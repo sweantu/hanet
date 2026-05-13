@@ -1,11 +1,12 @@
 import json
-import os
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from openai import OpenAI
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import BaseModel
 
 load_dotenv()
@@ -19,7 +20,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+llm = ChatOpenAI(model="gpt-4o-mini", streaming=True)
+
+
+def call_model(state: MessagesState):
+    return {"messages": [llm.invoke(state["messages"])]}
+
+
+builder = StateGraph(MessagesState)
+builder.add_node("agent", call_model)
+builder.add_edge(START, "agent")
+builder.add_edge("agent", END)
+graph = builder.compile()
 
 
 class Message(BaseModel):
@@ -32,22 +44,18 @@ class ChatRequest(BaseModel):
 
 
 @app.post("/chat")
-def chat(body: ChatRequest):
-    system_message = {"role": "system", "content": "You are a helpful assistant."}
-    messages = [system_message] + [
-        {"role": m.role, "content": m.content} for m in body.messages
+async def chat(body: ChatRequest):
+    messages = [SystemMessage(content="You are a helpful assistant.")] + [
+        HumanMessage(content=m.content) if m.role == "user" else AIMessage(content=m.content)
+        for m in body.messages
     ]
 
-    def generate():
-        stream = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            stream=True,
-        )
-        for chunk in stream:
-            text = chunk.choices[0].delta.content
-            if text:
-                yield f"data: {json.dumps({'text': text})}\n\n"
+    async def generate():
+        async for event in graph.astream_events({"messages": messages}, version="v2"):
+            if event["event"] == "on_chat_model_stream":
+                chunk = event["data"]["chunk"]
+                if chunk.content:
+                    yield f"data: {json.dumps({'text': chunk.content})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
