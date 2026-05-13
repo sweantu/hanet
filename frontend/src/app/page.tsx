@@ -7,21 +7,37 @@ interface Message {
   content: string;
 }
 
+interface Conversation {
+  id: string;
+  title: string;
+  created_at: string;
+}
+
 const API_URL = "http://localhost:8000";
 
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Auto-scroll to bottom when messages change
+  const fetchConversations = useCallback(async () => {
+    const res = await fetch(`${API_URL}/conversations`);
+    if (res.ok) setConversations(await res.json());
+  }, []);
+
+  useEffect(() => {
+    fetchConversations();
+  }, [fetchConversations]);
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Auto-resize textarea
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -29,9 +45,42 @@ export default function ChatPage() {
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, [input]);
 
+  const selectConversation = useCallback(async (id: string) => {
+    setActiveId(id);
+    const res = await fetch(`${API_URL}/conversations/${id}/messages`);
+    if (res.ok) setMessages(await res.json());
+  }, []);
+
+  const newChat = useCallback(() => {
+    setActiveId(null);
+    setMessages([]);
+    setInput("");
+  }, []);
+
+  const deleteConversation = useCallback(
+    async (e: React.MouseEvent, id: string) => {
+      e.stopPropagation();
+      await fetch(`${API_URL}/conversations/${id}`, { method: "DELETE" });
+      if (activeId === id) {
+        setActiveId(null);
+        setMessages([]);
+      }
+      fetchConversations();
+    },
+    [activeId, fetchConversations]
+  );
+
   const sendMessage = useCallback(async () => {
     const text = input.trim();
     if (!text || isStreaming) return;
+
+    let currentId = activeId;
+    if (!currentId) {
+      const res = await fetch(`${API_URL}/conversations`, { method: "POST" });
+      const conv: Conversation = await res.json();
+      currentId = conv.id;
+      setActiveId(currentId);
+    }
 
     const newMessages: Message[] = [
       ...messages,
@@ -40,15 +89,13 @@ export default function ChatPage() {
     setMessages(newMessages);
     setInput("");
     setIsStreaming(true);
-
-    // Append empty assistant message that will be filled by the stream
     setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
     try {
       const res = await fetch(`${API_URL}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: newMessages }),
+        body: JSON.stringify({ messages: newMessages, conversation_id: currentId }),
       });
 
       if (!res.ok || !res.body) throw new Error("Request failed");
@@ -62,8 +109,6 @@ export default function ChatPage() {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-
-        // SSE lines are separated by \n\n; split and process complete lines
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
 
@@ -88,7 +133,7 @@ export default function ChatPage() {
           }
         }
       }
-    } catch (err) {
+    } catch {
       setMessages((prev) => {
         const updated = [...prev];
         updated[updated.length - 1] = {
@@ -99,8 +144,9 @@ export default function ChatPage() {
       });
     } finally {
       setIsStreaming(false);
+      fetchConversations();
     }
-  }, [input, isStreaming, messages]);
+  }, [input, isStreaming, messages, activeId, fetchConversations]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -110,98 +156,149 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-gray-900">
-      {/* Header */}
-      <header className="bg-gray-900 border-b border-gray-700 px-6 py-4 shadow-sm flex-shrink-0">
-        <h1 className="text-lg font-semibold text-gray-100">Hanet Chat</h1>
-        <p className="text-xs text-gray-500 mt-0.5">Powered by Claude</p>
-      </header>
-
-      {/* Message list */}
-      <div className="flex-1 overflow-y-auto px-4 py-6">
-        <div className="max-w-3xl mx-auto space-y-6">
-          {messages.length === 0 && (
-            <div className="text-center text-gray-500 pt-24 select-none">
-              <p className="text-4xl mb-4">💬</p>
-              <p className="text-lg font-medium text-gray-400">
-                How can I help you today?
-              </p>
-              <p className="text-sm mt-1">
-                Type a message below to get started.
-              </p>
-            </div>
-          )}
-
-          {messages.map((msg, i) => {
-            const isLastAssistant =
-              isStreaming &&
-              i === messages.length - 1 &&
-              msg.role === "assistant";
-
-            return (
-              <div
-                key={i}
-                className={`flex gap-3 ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-              >
-                {msg.role === "assistant" && (
-                  <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-white text-xs font-bold flex-shrink-0 mt-1">
-                    AI
-                  </div>
-                )}
-
-                <div
-                  className={`max-w-[75%] px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${
-                    msg.role === "user"
-                      ? "bg-indigo-600 text-white rounded-tr-sm"
-                      : "bg-gray-800 text-gray-100 border border-gray-700 shadow-sm rounded-tl-sm"
-                  }`}
-                >
-                  {msg.content}
-                  {isLastAssistant && (
-                    <span className="inline-block w-[2px] h-[1em] bg-gray-400 ml-0.5 align-middle animate-pulse" />
-                  )}
-                  {isLastAssistant && msg.content === "" && (
-                    <span className="text-gray-500 italic">Thinking…</span>
-                  )}
-                </div>
-
-                {msg.role === "user" && (
-                  <div className="w-8 h-8 rounded-full bg-gray-600 flex items-center justify-center text-gray-200 text-xs font-bold flex-shrink-0 mt-1">
-                    You
-                  </div>
-                )}
-              </div>
-            );
-          })}
-
-          <div ref={bottomRef} />
-        </div>
-      </div>
-
-      {/* Input bar */}
-      <div className="flex-shrink-0 bg-gray-900 border-t border-gray-700 px-4 py-4">
-        <div className="max-w-3xl mx-auto flex items-end gap-3">
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Message Claude… (Enter to send, Shift+Enter for new line)"
-            rows={1}
-            disabled={isStreaming}
-            className="flex-1 resize-none rounded-xl border border-gray-600 px-4 py-3 text-sm text-gray-100 placeholder-gray-500 bg-gray-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:opacity-50 disabled:bg-gray-800 overflow-hidden"
-          />
+    <div className="flex h-screen bg-gray-900">
+      {/* Sidebar */}
+      <aside className="w-64 flex-shrink-0 flex flex-col bg-gray-950 border-r border-gray-700">
+        <div className="p-3 border-b border-gray-700">
           <button
-            onClick={sendMessage}
-            disabled={!input.trim() || isStreaming}
-            className="flex-shrink-0 px-5 py-3 bg-indigo-600 text-white text-sm font-medium rounded-xl hover:bg-indigo-700 active:bg-indigo-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            onClick={newChat}
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-gray-200 hover:bg-gray-800 transition-colors border border-gray-700"
           >
-            {isStreaming ? "…" : "Send"}
+            <span className="text-lg leading-none">+</span>
+            New Chat
           </button>
         </div>
-        <p className="text-center text-xs text-gray-600 mt-2">
-          Enter to send · Shift+Enter for new line
-        </p>
+
+        <div className="flex-1 overflow-y-auto py-2">
+          {conversations.length === 0 && (
+            <p className="text-xs text-gray-600 text-center mt-8 px-4">
+              No conversations yet
+            </p>
+          )}
+          {conversations.map((conv) => (
+            <div
+              key={conv.id}
+              onClick={() => selectConversation(conv.id)}
+              onMouseEnter={() => setHoveredId(conv.id)}
+              onMouseLeave={() => setHoveredId(null)}
+              className={`group relative mx-2 my-0.5 px-3 py-2 rounded-lg cursor-pointer transition-colors ${
+                activeId === conv.id
+                  ? "bg-indigo-700/40 text-gray-100"
+                  : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+              }`}
+            >
+              <p className="text-sm truncate pr-6">{conv.title}</p>
+              <p className="text-xs text-gray-600 mt-0.5">
+                {new Date(conv.created_at).toLocaleDateString()}
+              </p>
+              {hoveredId === conv.id && (
+                <button
+                  onClick={(e) => deleteConversation(e, conv.id)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-500 hover:text-red-400 transition-colors"
+                  title="Delete"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      </aside>
+
+      {/* Main chat area */}
+      <div className="flex flex-col flex-1 min-w-0">
+        {/* Header */}
+        <header className="bg-gray-900 border-b border-gray-700 px-6 py-4 shadow-sm flex-shrink-0">
+          <h1 className="text-lg font-semibold text-gray-100">Hanet Chat</h1>
+          <p className="text-xs text-gray-500 mt-0.5">Powered by Claude</p>
+        </header>
+
+        {/* Message list */}
+        <div className="flex-1 overflow-y-auto px-4 py-6">
+          <div className="max-w-3xl mx-auto space-y-6">
+            {messages.length === 0 && (
+              <div className="text-center text-gray-500 pt-24 select-none">
+                <p className="text-4xl mb-4">💬</p>
+                <p className="text-lg font-medium text-gray-400">
+                  How can I help you today?
+                </p>
+                <p className="text-sm mt-1">
+                  Type a message below to get started.
+                </p>
+              </div>
+            )}
+
+            {messages.map((msg, i) => {
+              const isLastAssistant =
+                isStreaming &&
+                i === messages.length - 1 &&
+                msg.role === "assistant";
+
+              return (
+                <div
+                  key={i}
+                  className={`flex gap-3 ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                >
+                  {msg.role === "assistant" && (
+                    <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-white text-xs font-bold flex-shrink-0 mt-1">
+                      AI
+                    </div>
+                  )}
+
+                  <div
+                    className={`max-w-[75%] px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${
+                      msg.role === "user"
+                        ? "bg-indigo-600 text-white rounded-tr-sm"
+                        : "bg-gray-800 text-gray-100 border border-gray-700 shadow-sm rounded-tl-sm"
+                    }`}
+                  >
+                    {msg.content}
+                    {isLastAssistant && (
+                      <span className="inline-block w-[2px] h-[1em] bg-gray-400 ml-0.5 align-middle animate-pulse" />
+                    )}
+                    {isLastAssistant && msg.content === "" && (
+                      <span className="text-gray-500 italic">Thinking…</span>
+                    )}
+                  </div>
+
+                  {msg.role === "user" && (
+                    <div className="w-8 h-8 rounded-full bg-gray-600 flex items-center justify-center text-gray-200 text-xs font-bold flex-shrink-0 mt-1">
+                      You
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            <div ref={bottomRef} />
+          </div>
+        </div>
+
+        {/* Input bar */}
+        <div className="flex-shrink-0 bg-gray-900 border-t border-gray-700 px-4 py-4">
+          <div className="max-w-3xl mx-auto flex items-end gap-3">
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Message Claude… (Enter to send, Shift+Enter for new line)"
+              rows={1}
+              disabled={isStreaming}
+              className="flex-1 resize-none rounded-xl border border-gray-600 px-4 py-3 text-sm text-gray-100 placeholder-gray-500 bg-gray-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:opacity-50 disabled:bg-gray-800 overflow-hidden"
+            />
+            <button
+              onClick={sendMessage}
+              disabled={!input.trim() || isStreaming}
+              className="flex-shrink-0 px-5 py-3 bg-indigo-600 text-white text-sm font-medium rounded-xl hover:bg-indigo-700 active:bg-indigo-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {isStreaming ? "…" : "Send"}
+            </button>
+          </div>
+          <p className="text-center text-xs text-gray-600 mt-2">
+            Enter to send · Shift+Enter for new line
+          </p>
+        </div>
       </div>
     </div>
   );
