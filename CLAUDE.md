@@ -1,7 +1,7 @@
 # Hanet — Agent Chat App
 
 ## Current state
-Basic streaming chat: user sends a message, AI replies word-by-word via SSE. No database yet.
+Basic streaming chat: user sends a message, AI replies word-by-word via SSE. No database yet. UI is dark mode (gray-900 background, Tailwind utility classes in `page.tsx`).
 
 ## Stack
 - **Frontend:** Next.js 15, TypeScript, Tailwind CSS (`frontend/`)

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 interface Message {
   role: "user" | "assistant";
@@ -33,7 +33,10 @@ export default function ChatPage() {
     const text = input.trim();
     if (!text || isStreaming) return;
 
-    const newMessages: Message[] = [...messages, { role: "user", content: text }];
+    const newMessages: Message[] = [
+      ...messages,
+      { role: "user", content: text },
+    ];
     setMessages(newMessages);
     setInput("");
     setIsStreaming(true);
@@ -107,27 +110,33 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-gray-50">
+    <div className="flex flex-col h-screen bg-gray-900">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 px-6 py-4 shadow-sm flex-shrink-0">
-        <h1 className="text-lg font-semibold text-gray-800">Hanet Chat</h1>
-        <p className="text-xs text-gray-400 mt-0.5">Powered by Claude</p>
+      <header className="bg-gray-900 border-b border-gray-700 px-6 py-4 shadow-sm flex-shrink-0">
+        <h1 className="text-lg font-semibold text-gray-100">Hanet Chat</h1>
+        <p className="text-xs text-gray-500 mt-0.5">Powered by Claude</p>
       </header>
 
       {/* Message list */}
       <div className="flex-1 overflow-y-auto px-4 py-6">
         <div className="max-w-3xl mx-auto space-y-6">
           {messages.length === 0 && (
-            <div className="text-center text-gray-400 pt-24 select-none">
+            <div className="text-center text-gray-500 pt-24 select-none">
               <p className="text-4xl mb-4">💬</p>
-              <p className="text-lg font-medium text-gray-500">How can I help you today?</p>
-              <p className="text-sm mt-1">Type a message below to get started.</p>
+              <p className="text-lg font-medium text-gray-400">
+                How can I help you today?
+              </p>
+              <p className="text-sm mt-1">
+                Type a message below to get started.
+              </p>
             </div>
           )}
 
           {messages.map((msg, i) => {
             const isLastAssistant =
-              isStreaming && i === messages.length - 1 && msg.role === "assistant";
+              isStreaming &&
+              i === messages.length - 1 &&
+              msg.role === "assistant";
 
             return (
               <div
@@ -144,20 +153,20 @@ export default function ChatPage() {
                   className={`max-w-[75%] px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${
                     msg.role === "user"
                       ? "bg-indigo-600 text-white rounded-tr-sm"
-                      : "bg-white text-gray-800 border border-gray-200 shadow-sm rounded-tl-sm"
+                      : "bg-gray-800 text-gray-100 border border-gray-700 shadow-sm rounded-tl-sm"
                   }`}
                 >
                   {msg.content}
                   {isLastAssistant && (
-                    <span className="inline-block w-[2px] h-[1em] bg-gray-500 ml-0.5 align-middle animate-pulse" />
+                    <span className="inline-block w-[2px] h-[1em] bg-gray-400 ml-0.5 align-middle animate-pulse" />
                   )}
                   {isLastAssistant && msg.content === "" && (
-                    <span className="text-gray-400 italic">Thinking…</span>
+                    <span className="text-gray-500 italic">Thinking…</span>
                   )}
                 </div>
 
                 {msg.role === "user" && (
-                  <div className="w-8 h-8 rounded-full bg-gray-300 flex items-center justify-center text-gray-600 text-xs font-bold flex-shrink-0 mt-1">
+                  <div className="w-8 h-8 rounded-full bg-gray-600 flex items-center justify-center text-gray-200 text-xs font-bold flex-shrink-0 mt-1">
                     You
                   </div>
                 )}
@@ -170,7 +179,7 @@ export default function ChatPage() {
       </div>
 
       {/* Input bar */}
-      <div className="flex-shrink-0 bg-white border-t border-gray-200 px-4 py-4">
+      <div className="flex-shrink-0 bg-gray-900 border-t border-gray-700 px-4 py-4">
         <div className="max-w-3xl mx-auto flex items-end gap-3">
           <textarea
             ref={textareaRef}
@@ -180,7 +189,7 @@ export default function ChatPage() {
             placeholder="Message Claude… (Enter to send, Shift+Enter for new line)"
             rows={1}
             disabled={isStreaming}
-            className="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:opacity-50 disabled:bg-gray-50 overflow-hidden"
+            className="flex-1 resize-none rounded-xl border border-gray-600 px-4 py-3 text-sm text-gray-100 placeholder-gray-500 bg-gray-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:opacity-50 disabled:bg-gray-800 overflow-hidden"
           />
           <button
             onClick={sendMessage}
@@ -190,7 +199,7 @@ export default function ChatPage() {
             {isStreaming ? "…" : "Send"}
           </button>
         </div>
-        <p className="text-center text-xs text-gray-400 mt-2">
+        <p className="text-center text-xs text-gray-600 mt-2">
           Enter to send · Shift+Enter for new line
         </p>
       </div>
