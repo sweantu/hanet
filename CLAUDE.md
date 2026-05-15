@@ -1,16 +1,17 @@
 # Hanet — Agent Chat App
 
 ## Current state
-Streaming chat with persistent conversation history. PostgreSQL stores conversations and messages. Sidebar lists past conversations; clicking one loads its history. UI is dark mode (gray-900 background, Tailwind utility classes in `page.tsx`).
+Streaming chat with persistent conversation history and hybrid search. PostgreSQL stores conversations, messages, and document chunks with embeddings. Sidebar lists past conversations. UI is dark mode (gray-900 background, Tailwind utility classes in `page.tsx`).
 
-## Last session recap — 2026-05-13
-Added PostgreSQL persistence via Docker Compose + asyncpg. Set up Alembic migrations. Added four conversation CRUD endpoints. Modified `/chat` to save user + assistant messages and auto-title the conversation from the first message. Redesigned frontend layout to include a sidebar with conversation list, new chat button, and delete-on-hover.
+## Last session recap — 2026-05-14/15
+Added hybrid search backend: `documents` table stores 512-token chunks with `vector(1536)` embeddings and generated `tsvector` for keyword search. Three search endpoints: `POST /search` (hybrid RRF), `POST /search/semantic` (pgvector cosine similarity, supports `threshold` param), `POST /search/keyword` (tsvector ts_rank). Embeddings generated via `text-embedding-3-small` after each chat round-trip. Docker image switched to `pgvector/pgvector:pg16`. Backfill script at `backend/backfill_embeddings.py` for existing messages.
 
 ## Stack
 - **Frontend:** Next.js 15, TypeScript, Tailwind CSS (`frontend/`)
 - **Backend:** FastAPI, Python (`backend/`)
 - **LLM:** LangGraph + `langchain-openai`, model `gpt-4o-mini`
-- **Database:** PostgreSQL 16 (Docker), accessed via `asyncpg`
+- **Embeddings:** `text-embedding-3-small` via `OpenAIEmbeddings` (langchain-openai)
+- **Database:** PostgreSQL 16 + pgvector (Docker image `pgvector/pgvector:pg16`), accessed via `asyncpg`
 - **Migrations:** Alembic + SQLAlchemy (async `env.py`)
 
 ## How to run
@@ -32,10 +33,12 @@ cd frontend && npm install && npm run dev
 
 **Backend**
 - `POST /chat` receives `{ messages: [...], conversation_id? }`, streams SSE tokens back
-- After stream completes, persists assistant reply and updates `conversations.updated_at`
+- After stream completes, persists assistant reply, updates `conversations.updated_at`, then chunks + embeds both messages into `documents`
 - LangGraph graph: `START → agent → END`; single node calls `llm.invoke`
 - SSE format: `data: {"text": "..."}` lines, terminated by `data: [DONE]`
-- DB pool created on startup via `asyncpg.create_pool()` (FastAPI `lifespan`)
+- DB pool created on startup via `asyncpg.create_pool(init=register_vector)` (FastAPI `lifespan`)
+- Chunking: `tiktoken` with `cl100k_base` encoder, 512-token window, 64-token overlap (`chunk_text`)
+- `save_chunks(db, collection, content, metadata)` — chunks text, embeds, bulk-inserts into `documents`
 
 **Frontend**
 - Layout: sidebar (256px) + chat column (flex-1)
@@ -49,28 +52,38 @@ cd frontend && npm install && npm run dev
 
 ```
 backend/
-  main.py          — FastAPI app + asyncpg pool; LangGraph graph; all endpoints
-  requirements.txt — langgraph, langchain-openai, fastapi, uvicorn, asyncpg, alembic, sqlalchemy, greenlet
-  .env             — OPENAI_API_KEY, DATABASE_URL
-  alembic.ini      — Alembic config (script_location = migrations/)
+  main.py               — FastAPI app + asyncpg pool; LangGraph graph; all endpoints
+  requirements.txt      — langgraph, langchain-openai, fastapi, uvicorn, asyncpg, alembic,
+                          sqlalchemy, greenlet, pgvector, tiktoken
+  backfill_embeddings.py — one-time script to chunk + embed existing messages
+  .env                  — OPENAI_API_KEY, DATABASE_URL
+  alembic.ini           — Alembic config (script_location = migrations/)
   migrations/
     env.py                               — async env; reads DATABASE_URL from env
     versions/
       0001_create_conversations_messages.py
+      0002_add_documents.py              — documents table + ivfflat/GIN/btree indexes
 ```
 
 Key symbols in `backend/main.py`:
 - `llm` — `ChatOpenAI(model="gpt-4o-mini", streaming=True)`
+- `embeddings_model` — `OpenAIEmbeddings(model="text-embedding-3-small")`
+- `chunk_text(text)` — splits text into 512-token chunks with 64-token overlap
+- `save_chunks(db, collection, content, metadata)` — chunks + embeds + inserts into `documents`
 - `agent` / `graph` — LangGraph node + compiled graph
 - `Message` — Pydantic model `{ role, content }`
 - `ChatRequest` — Pydantic model `{ messages, conversation_id? }`
 - `ConversationCreate` — Pydantic model `{ title? }`
+- `SearchRequest` — Pydantic model `{ query, limit=10, threshold?  }` (`threshold` = min cosine similarity, semantic only)
 - `GET /conversations` — list all, newest first
 - `POST /conversations` — create blank conversation
 - `DELETE /conversations/{id}` — cascade delete
 - `GET /conversations/{id}/messages` — fetch message history
-- `POST /chat` — stream SSE; persist messages; auto-title on first send
-- `lifespan` — opens/closes asyncpg pool
+- `POST /chat` — stream SSE; persist messages; auto-title; chunk + embed after `[DONE]`
+- `POST /search` — hybrid RRF (semantic + keyword); returns `rrf_score`
+- `POST /search/semantic` — pgvector cosine similarity only; returns `score` (0–1); supports `threshold`
+- `POST /search/keyword` — tsvector `ts_rank` only; returns `score`
+- `lifespan` — opens/closes asyncpg pool with `register_vector`
 
 ## Frontend structure
 
@@ -101,5 +114,6 @@ Key symbols in `frontend/src/app/page.tsx`:
 See `CHANGELOG.md` for full session-by-session history.
 
 ## Planned next steps
+- Add search UI to the frontend sidebar
 - Add tools/agents to the LangGraph graph
 - Rename conversations from the sidebar
