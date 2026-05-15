@@ -1,10 +1,10 @@
 # Hanet — Agent Chat App
 
 ## Current state
-Streaming chat with persistent conversation history and hybrid search. PostgreSQL stores conversations, messages, and document chunks with embeddings. Sidebar lists past conversations. UI is dark mode (gray-900 background, Tailwind utility classes in `page.tsx`).
+Streaming chat with persistent conversation history, hybrid search, and search-to-message navigation. PostgreSQL stores conversations, messages, and document chunks with embeddings. Sidebar lists past conversations. UI is dark mode (gray-900 background, Tailwind utility classes in `page.tsx`).
 
-## Last session recap — 2026-05-14/15
-Added hybrid search backend: `documents` table stores 512-token chunks with `vector(1536)` embeddings and generated `tsvector` for keyword search. Three search endpoints: `POST /search` (hybrid RRF), `POST /search/semantic` (pgvector cosine similarity, supports `threshold` param), `POST /search/keyword` (tsvector ts_rank). Embeddings generated via `text-embedding-3-small` after each chat round-trip. Docker image switched to `pgvector/pgvector:pg16`. Backfill script at `backend/backfill_embeddings.py` for existing messages.
+## Last session recap — 2026-05-15
+Added full-text message search feature. Backend: all three search endpoints now return `conversation_created_at`; `GET /conversations/{id}/messages` now returns `id` per message. Frontend: 🔍 button beside "+ New Chat" opens a centered modal popup; search input + results list (title, date, content excerpt); clicking a result loads the conversation and smooth-scrolls to the exact message with a 2-second indigo highlight ring. Scroll-to-target uses a single merged `useEffect` on `[messages]` with an early-return guard so scroll-to-bottom never overrides it.
 
 ## Stack
 - **Frontend:** Next.js 15, TypeScript, Tailwind CSS (`frontend/`)
@@ -78,11 +78,11 @@ Key symbols in `backend/main.py`:
 - `GET /conversations` — list all, newest first
 - `POST /conversations` — create blank conversation
 - `DELETE /conversations/{id}` — cascade delete
-- `GET /conversations/{id}/messages` — fetch message history
+- `GET /conversations/{id}/messages` — fetch message history; returns `{ id, role, content }` per message
 - `POST /chat` — stream SSE; persist messages; auto-title; chunk + embed after `[DONE]`
-- `POST /search` — hybrid RRF (semantic + keyword); returns `rrf_score`
-- `POST /search/semantic` — pgvector cosine similarity only; returns `score` (0–1); supports `threshold`
-- `POST /search/keyword` — tsvector `ts_rank` only; returns `score`
+- `POST /search` — hybrid RRF (semantic + keyword); returns `rrf_score`, `conversation_created_at`
+- `POST /search/semantic` — pgvector cosine similarity only; returns `score` (0–1), `conversation_created_at`; supports `threshold`
+- `POST /search/keyword` — tsvector `ts_rank` only; returns `score`, `conversation_created_at`
 - `lifespan` — opens/closes asyncpg pool with `register_vector`
 
 ## Frontend structure
@@ -95,25 +95,31 @@ frontend/src/app/
 ```
 
 Key symbols in `frontend/src/app/page.tsx`:
-- `Message` — interface `{ role: "user" | "assistant", content: string }`
+- `Message` — interface `{ id?, role: "user" | "assistant", content: string }`
 - `Conversation` — interface `{ id, title, created_at }`
+- `SearchResult` — interface `{ id, content, conversation_title, conversation_created_at, metadata: { conversation_id, message_id, role }, rrf_score }`
 - `API_URL` — `"http://localhost:8000"`
 - `ChatPage` — default export; owns all state
-- `messages` — `useState<Message[]>` — active conversation messages
+- `messages` — `useState<Message[]>` — active conversation messages (each has `id` for DOM anchoring)
 - `conversations` — `useState<Conversation[]>` — sidebar list
 - `activeId` — `useState<string | null>` — selected conversation id
 - `hoveredId` — `useState<string | null>` — controls delete button visibility
+- `searchOpen` — `useState<boolean>` — controls search modal visibility
+- `searchQuery` / `searchResults` / `searchLoading` — search modal state
+- `targetMessageIdRef` — `useRef<string | null>` — message id to scroll to after conversation loads
 - `fetchConversations()` — refreshes sidebar from `GET /conversations`
 - `selectConversation(id)` — loads messages for a conversation
 - `newChat()` — clears state, no active conversation
 - `deleteConversation(e, id)` — deletes and refreshes sidebar
+- `runSearch()` — POSTs to `/search` with current query, updates `searchResults`
+- `goToResult(result)` — closes modal, sets `targetMessageIdRef`, calls `selectConversation`
 - `sendMessage()` — creates conversation if needed, posts to `/chat`, reads SSE
 - `handleKeyDown()` — Enter sends, Shift+Enter newline
+- scroll effect — single `useEffect([messages])`: scrolls to `targetMessageIdRef` with highlight if set, otherwise scrolls to bottom
 
 ## Changelog
 See `CHANGELOG.md` for full session-by-session history.
 
 ## Planned next steps
-- Add search UI to the frontend sidebar
 - Add tools/agents to the LangGraph graph
 - Rename conversations from the sidebar

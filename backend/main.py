@@ -132,10 +132,10 @@ async def delete_conversation(conversation_id: str):
 @app.get("/conversations/{conversation_id}/messages")
 async def get_messages(conversation_id: str):
     rows = await app.state.db.fetch(
-        "SELECT role, content FROM messages WHERE conversation_id = $1::uuid ORDER BY created_at ASC",
+        "SELECT id, role, content FROM messages WHERE conversation_id = $1::uuid ORDER BY created_at ASC",
         conversation_id,
     )
-    return [{"role": r["role"], "content": r["content"]} for r in rows]
+    return [{"id": str(r["id"]), "role": r["role"], "content": r["content"]} for r in rows]
 
 
 # ── Search endpoint ───────────────────────────────────────────────────────────
@@ -180,6 +180,7 @@ async def search(body: SearchRequest):
             d.content,
             d.metadata,
             c.title AS conversation_title,
+            c.created_at AS conversation_created_at,
             f.rrf_score
         FROM fused f
         JOIN documents d ON d.id = f.id
@@ -198,6 +199,7 @@ async def search(body: SearchRequest):
             "content": r["content"],
             "metadata": json.loads(r["metadata"]) if isinstance(r["metadata"], str) else r["metadata"],
             "conversation_title": r["conversation_title"],
+            "conversation_created_at": r["conversation_created_at"].isoformat(),
             "rrf_score": float(r["rrf_score"]),
         }
         for r in rows
@@ -215,6 +217,7 @@ async def search_semantic(body: SearchRequest):
         f"""
         SELECT d.id, d.content, d.metadata,
                c.title AS conversation_title,
+               c.created_at AS conversation_created_at,
                d.embedding <=> $1::vector AS distance
         FROM documents d
         JOIN conversations c ON c.id = (d.metadata->>'conversation_id')::uuid
@@ -235,6 +238,7 @@ async def search_semantic(body: SearchRequest):
             "content": r["content"],
             "metadata": json.loads(r["metadata"]) if isinstance(r["metadata"], str) else r["metadata"],
             "conversation_title": r["conversation_title"],
+            "conversation_created_at": r["conversation_created_at"].isoformat(),
             "score": round(1 - float(r["distance"]), 4),  # cosine similarity = 1 - distance
         }
         for r in rows
@@ -250,6 +254,7 @@ async def search_keyword(body: SearchRequest):
         """
         SELECT d.id, d.content, d.metadata,
                c.title AS conversation_title,
+               c.created_at AS conversation_created_at,
                ts_rank(d.fts, plainto_tsquery('english', $1)) AS rank
         FROM documents d
         JOIN conversations c ON c.id = (d.metadata->>'conversation_id')::uuid
@@ -268,6 +273,7 @@ async def search_keyword(body: SearchRequest):
             "content": r["content"],
             "metadata": json.loads(r["metadata"]) if isinstance(r["metadata"], str) else r["metadata"],
             "conversation_title": r["conversation_title"],
+            "conversation_created_at": r["conversation_created_at"].isoformat(),
             "score": float(r["rank"]),
         }
         for r in rows
