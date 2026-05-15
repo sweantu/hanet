@@ -36,14 +36,31 @@ export default function ChatPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [convNextCursor, setConvNextCursor] = useState<string | null>(null);
+  const [convHasMore, setConvHasMore] = useState(false);
+  const [msgPrevCursor, setMsgPrevCursor] = useState<string | null>(null);
+  const [msgHasOlder, setMsgHasOlder] = useState(false);
   const targetMessageIdRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const scrollRestoreRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  const fetchConversations = useCallback(async () => {
-    const res = await fetch(`${API_URL}/conversations`);
-    if (res.ok) setConversations(await res.json());
+  const fetchConversations = useCallback(async (cursor?: string) => {
+    const url = cursor
+      ? `${API_URL}/conversations?cursor=${cursor}`
+      : `${API_URL}/conversations`;
+    const res = await fetch(url);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (cursor) {
+      setConversations((prev) => [...prev, ...data.items]);
+    } else {
+      setConversations(data.items);
+    }
+    setConvNextCursor(data.next_cursor);
+    setConvHasMore(!!data.next_cursor);
   }, []);
 
   useEffect(() => {
@@ -51,6 +68,14 @@ export default function ChatPage() {
   }, [fetchConversations]);
 
   useEffect(() => {
+    if (scrollRestoreRef.current !== null) {
+      const container = messagesContainerRef.current;
+      if (container) {
+        container.scrollTop = container.scrollHeight - scrollRestoreRef.current;
+      }
+      scrollRestoreRef.current = null;
+      return;
+    }
     if (targetMessageIdRef.current && messages.length > 0) {
       const el = document.getElementById(targetMessageIdRef.current);
       if (el) {
@@ -86,17 +111,42 @@ export default function ChatPage() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
-  const selectConversation = useCallback(async (id: string) => {
+  const selectConversation = useCallback(async (id: string, loadAll = false) => {
     setActiveId(id);
-    const res = await fetch(`${API_URL}/conversations/${id}/messages`);
-    if (res.ok) setMessages(await res.json());
+    setMsgPrevCursor(null);
+    setMsgHasOlder(false);
+    const url = loadAll
+      ? `${API_URL}/conversations/${id}/messages?limit=0`
+      : `${API_URL}/conversations/${id}/messages`;
+    const res = await fetch(url);
+    if (!res.ok) return;
+    const data = await res.json();
+    setMessages(data.items);
+    setMsgPrevCursor(data.prev_cursor);
+    setMsgHasOlder(!!data.prev_cursor);
   }, []);
 
   const newChat = useCallback(() => {
     setActiveId(null);
     setMessages([]);
     setInput("");
+    setMsgPrevCursor(null);
+    setMsgHasOlder(false);
   }, []);
+
+  const loadOlderMessages = useCallback(async () => {
+    if (!msgPrevCursor || !activeId) return;
+    const container = messagesContainerRef.current;
+    scrollRestoreRef.current = container?.scrollHeight ?? null;
+    const res = await fetch(
+      `${API_URL}/conversations/${activeId}/messages?cursor=${msgPrevCursor}`
+    );
+    if (!res.ok) return;
+    const data = await res.json();
+    setMessages((prev) => [...data.items, ...prev]);
+    setMsgPrevCursor(data.prev_cursor);
+    setMsgHasOlder(!!data.prev_cursor);
+  }, [msgPrevCursor, activeId]);
 
   const deleteConversation = useCallback(
     async (e: React.MouseEvent, id: string) => {
@@ -127,7 +177,7 @@ export default function ChatPage() {
     async (result: SearchResult) => {
       setSearchOpen(false);
       targetMessageIdRef.current = result.metadata.message_id;
-      await selectConversation(result.metadata.conversation_id);
+      await selectConversation(result.metadata.conversation_id, true);
     },
     [selectConversation]
   );
@@ -157,7 +207,7 @@ export default function ChatPage() {
       const res = await fetch(`${API_URL}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: newMessages, conversation_id: currentId }),
+        body: JSON.stringify({ message: text, conversation_id: currentId }),
       });
 
       if (!res.ok || !res.body) throw new Error("Request failed");
@@ -275,6 +325,14 @@ export default function ChatPage() {
               )}
             </div>
           ))}
+          {convHasMore && (
+            <button
+              onClick={() => fetchConversations(convNextCursor ?? undefined)}
+              className="w-full text-xs text-gray-500 hover:text-gray-300 py-2 transition-colors"
+            >
+              Load more
+            </button>
+          )}
         </div>
       </aside>
 
@@ -356,8 +414,18 @@ export default function ChatPage() {
         </header>
 
         {/* Message list */}
-        <div className="flex-1 overflow-y-auto px-4 py-6">
+        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto px-4 py-6">
           <div className="max-w-3xl mx-auto space-y-6">
+            {msgHasOlder && (
+              <div className="text-center pt-2 pb-4">
+                <button
+                  onClick={loadOlderMessages}
+                  className="text-xs text-indigo-400 hover:text-indigo-300 px-4 py-2 rounded-lg hover:bg-gray-800 transition-colors"
+                >
+                  Load older messages
+                </button>
+              </div>
+            )}
             {messages.length === 0 && (
               <div className="text-center text-gray-500 pt-24 select-none">
                 <p className="text-4xl mb-4">💬</p>

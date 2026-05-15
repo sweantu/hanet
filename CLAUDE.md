@@ -4,7 +4,7 @@
 Streaming chat with persistent conversation history, hybrid search, and search-to-message navigation. PostgreSQL stores conversations, messages, and document chunks with embeddings. Sidebar lists past conversations. UI is dark mode (gray-900 background, Tailwind utility classes in `page.tsx`).
 
 ## Last session recap — 2026-05-15
-Added full-text message search feature. Backend: all three search endpoints now return `conversation_created_at`; `GET /conversations/{id}/messages` now returns `id` per message. Frontend: 🔍 button beside "+ New Chat" opens a centered modal popup; search input + results list (title, date, content excerpt); clicking a result loads the conversation and smooth-scrolls to the exact message with a 2-second indigo highlight ring. Scroll-to-target uses a single merged `useEffect` on `[messages]` with an early-return guard so scroll-to-bottom never overrides it.
+Moved context window control to backend and added cursor pagination. Backend now owns history: `POST /chat` accepts `{ message, conversation_id }`, saves the user message, then fetches the 10 most recent messages from DB for LLM context. `GET /conversations` and `GET /conversations/{id}/messages` both use keyset cursor pagination (10/page); messages endpoint supports `?limit=0` to bypass pagination for search navigation. Frontend: `sendMessage` sends only the current message string; sidebar has "Load more" for conversations; chat area has "Load older messages" that prepends and restores scroll position.
 
 ## Stack
 - **Frontend:** Next.js 15, TypeScript, Tailwind CSS (`frontend/`)
@@ -66,20 +66,21 @@ backend/
 ```
 
 Key symbols in `backend/main.py`:
+- `_encode_cursor(*parts)` / `_decode_cursor(cursor)` — base64url keyset cursor helpers
 - `llm` — `ChatOpenAI(model="gpt-4o-mini", streaming=True)`
 - `embeddings_model` — `OpenAIEmbeddings(model="text-embedding-3-small")`
 - `chunk_text(text)` — splits text into 512-token chunks with 64-token overlap
 - `save_chunks(db, collection, content, metadata)` — chunks + embeds + inserts into `documents`
 - `agent` / `graph` — LangGraph node + compiled graph
 - `Message` — Pydantic model `{ role, content }`
-- `ChatRequest` — Pydantic model `{ messages, conversation_id? }`
+- `ChatRequest` — Pydantic model `{ message: str, conversation_id: str }`
 - `ConversationCreate` — Pydantic model `{ title? }`
 - `SearchRequest` — Pydantic model `{ query, limit=10, threshold?  }` (`threshold` = min cosine similarity, semantic only)
-- `GET /conversations` — list all, newest first
+- `GET /conversations` — paginated list, newest first; params: `cursor`, `limit=10`; returns `{ items, next_cursor }`
 - `POST /conversations` — create blank conversation
 - `DELETE /conversations/{id}` — cascade delete
-- `GET /conversations/{id}/messages` — fetch message history; returns `{ id, role, content }` per message
-- `POST /chat` — stream SSE; persist messages; auto-title; chunk + embed after `[DONE]`
+- `GET /conversations/{id}/messages` — paginated history; params: `cursor`, `limit=10` (`limit=0` = all); returns `{ items, prev_cursor }`; newest-10 by default, reversed to oldest-first
+- `POST /chat` — accepts `{ message, conversation_id }`; saves user msg, fetches 10 latest from DB for context, streams SSE; persist assistant reply; chunk + embed after `[DONE]`
 - `POST /search` — hybrid RRF (semantic + keyword); returns `rrf_score`, `conversation_created_at`
 - `POST /search/semantic` — pgvector cosine similarity only; returns `score` (0–1), `conversation_created_at`; supports `threshold`
 - `POST /search/keyword` — tsvector `ts_rank` only; returns `score`, `conversation_created_at`
@@ -100,22 +101,27 @@ Key symbols in `frontend/src/app/page.tsx`:
 - `SearchResult` — interface `{ id, content, conversation_title, conversation_created_at, metadata: { conversation_id, message_id, role }, rrf_score }`
 - `API_URL` — `"http://localhost:8000"`
 - `ChatPage` — default export; owns all state
-- `messages` — `useState<Message[]>` — active conversation messages (each has `id` for DOM anchoring)
-- `conversations` — `useState<Conversation[]>` — sidebar list
+- `messages` — `useState<Message[]>` — active conversation messages (current page + live session)
+- `conversations` — `useState<Conversation[]>` — sidebar list (current page)
 - `activeId` — `useState<string | null>` — selected conversation id
 - `hoveredId` — `useState<string | null>` — controls delete button visibility
 - `searchOpen` — `useState<boolean>` — controls search modal visibility
 - `searchQuery` / `searchResults` / `searchLoading` — search modal state
+- `convNextCursor` / `convHasMore` — cursor pagination state for conversations sidebar
+- `msgPrevCursor` / `msgHasOlder` — cursor pagination state for messages (older pages)
 - `targetMessageIdRef` — `useRef<string | null>` — message id to scroll to after conversation loads
-- `fetchConversations()` — refreshes sidebar from `GET /conversations`
-- `selectConversation(id)` — loads messages for a conversation
-- `newChat()` — clears state, no active conversation
+- `messagesContainerRef` — `useRef<HTMLDivElement>` — ref to scrollable messages div; used to read/restore `scrollHeight` when prepending older messages
+- `scrollRestoreRef` — `useRef<number | null>` — captures `scrollHeight` before prepend; consumed by scroll `useEffect` to restore `scrollTop`
+- `fetchConversations(cursor?)` — refreshes/appends sidebar; no cursor = reset list
+- `selectConversation(id, loadAll?)` — loads paginated messages; `loadAll=true` fetches all (used by search navigation)
+- `loadOlderMessages()` — fetches previous page, prepends to `messages`, restores scroll position
+- `newChat()` — clears state and cursor state, no active conversation
 - `deleteConversation(e, id)` — deletes and refreshes sidebar
 - `runSearch()` — POSTs to `/search` with current query, updates `searchResults`
-- `goToResult(result)` — closes modal, sets `targetMessageIdRef`, calls `selectConversation`
-- `sendMessage()` — creates conversation if needed, posts to `/chat`, reads SSE
+- `goToResult(result)` — closes modal, sets `targetMessageIdRef`, calls `selectConversation(..., true)`
+- `sendMessage()` — creates conversation if needed, posts `{ message, conversation_id }` to `/chat`, reads SSE
 - `handleKeyDown()` — Enter sends, Shift+Enter newline
-- scroll effect — single `useEffect([messages])`: scrolls to `targetMessageIdRef` with highlight if set, otherwise scrolls to bottom
+- scroll effect — single `useEffect([messages])`: restores scroll after prepend if `scrollRestoreRef` set; else scrolls to `targetMessageIdRef` with highlight; else scrolls to bottom
 
 ## Changelog
 See `CHANGELOG.md` for full session-by-session history.
