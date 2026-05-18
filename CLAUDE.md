@@ -1,10 +1,10 @@
 # Hanet — Agent Chat App
 
 ## Current state
-Streaming chat with persistent conversation history, hybrid search, and search-to-message navigation. PostgreSQL stores conversations, messages, and document chunks with embeddings. Sidebar lists past conversations. UI is dark mode (gray-900 background, Tailwind utility classes in `page.tsx`).
+Streaming chat with persistent conversation history, hybrid search, and search-to-message navigation. PostgreSQL stores conversations, messages, and document chunks with embeddings. Sidebar lists past conversations. UI is dark mode (gray-900 background, Tailwind CSS). Both backend and frontend are separated by feature into focused modules.
 
 ## Last session recap — 2026-05-18
-Added RAG retrieval pipeline (HyDE + hybrid search + LLM reranking) to the backend. Three new endpoints: `POST /search/rag` returns ranked chunks with `relevance_score`; `POST /search/rag/messages` returns a single best `MessagePair` (assistant message + preceding user message) or `null` when best score < 8; both search only `role='assistant'` chunks. Shared logic lives in `_rag_retrieve(query, limit, db)`. `POST /chat` now calls `_rag_retrieve` before building the LLM context — if a relevant pair is found and its `message_id` is not already in the 10 most recent messages, it is prepended to `lc_messages` as a priming Q&A pair.
+Refactored backend and frontend by feature. Backend: `main.py` split into `llm.py`, `models.py`, `sql.py`, `db.py`, `rag.py`, `dependencies.py`, and `routers/` (conversations, chat, search). `load_dotenv()` moved to `llm.py` so it runs before OpenAI clients are constructed. Frontend: `page.tsx` split into `types/index.ts`, `lib/api.ts`, four hooks (`useConversations`, `useMessages`, `useChat`, `useSearch`), and four components (`Sidebar`, `SearchModal`, `MessageList`, `ChatInput`). No behaviour changes.
 
 ## Stack
 - **Frontend:** Next.js 15, TypeScript, Tailwind CSS (`frontend/`)
@@ -52,7 +52,13 @@ cd frontend && npm install && npm run dev
 
 ```
 backend/
-  main.py               — FastAPI app + asyncpg pool; LangGraph graph; all endpoints
+  main.py               — FastAPI app + asyncpg lifespan + CORS + include_router (~30 lines)
+  llm.py                — llm, embeddings_model, LangGraph graph; calls load_dotenv()
+  models.py             — all Pydantic models
+  sql.py                — HYBRID_SEARCH_SQL, HYBRID_SEARCH_ASSISTANT_SQL constants
+  db.py                 — chunk_text, save_chunks, encode_cursor, decode_cursor
+  rag.py                — rag_retrieve(query, limit, db) → MessagePair | None
+  dependencies.py       — get_db(request) FastAPI dependency
   requirements.txt      — langgraph, langchain-openai, fastapi, uvicorn, asyncpg, alembic,
                           sqlalchemy, greenlet, pgvector, tiktoken
   backfill_embeddings.py — one-time script to chunk + embed existing messages
@@ -63,73 +69,48 @@ backend/
     versions/
       0001_create_conversations_messages.py
       0002_add_documents.py              — documents table + ivfflat/GIN/btree indexes
+  routers/
+    conversations.py    — GET/POST/DELETE /conversations; GET /conversations/{id}/messages
+    chat.py             — POST /chat
+    search.py           — POST /search, /search/semantic, /search/keyword, /search/rag, /search/rag/messages
 ```
 
-Key symbols in `backend/main.py`:
-- `_encode_cursor(*parts)` / `_decode_cursor(cursor)` — base64url keyset cursor helpers
-- `llm` — `ChatOpenAI(model="gpt-4o-mini", streaming=True)`
-- `embeddings_model` — `OpenAIEmbeddings(model="text-embedding-3-small")`
-- `chunk_text(text)` — splits text into 512-token chunks with 64-token overlap
-- `save_chunks(db, collection, content, metadata)` — chunks + embeds + inserts into `documents`
-- `agent` / `graph` — LangGraph node + compiled graph
-- `Message` — Pydantic model `{ role, content }`
-- `ChatRequest` — Pydantic model `{ message: str, conversation_id: str }`
-- `ConversationCreate` — Pydantic model `{ title? }`
-- `SearchRequest` — Pydantic model `{ query, limit=10, threshold?  }` (`threshold` = min cosine similarity, semantic only)
-- `GET /conversations` — paginated list, newest first; params: `cursor`, `limit=10`; returns `{ items, next_cursor }`
-- `POST /conversations` — create blank conversation
-- `DELETE /conversations/{id}` — cascade delete
-- `GET /conversations/{id}/messages` — paginated history; params: `cursor`, `limit=10` (`limit=0` = all); returns `{ items, prev_cursor }`; newest-10 by default, reversed to oldest-first
-- `POST /chat` — accepts `{ message, conversation_id }`; saves user msg, fetches 10 latest from DB for context, calls `_rag_retrieve` and prepends RAG pair if relevant and not already in context, streams SSE; persist assistant reply; chunk + embed after `[DONE]`
-- `POST /search` — hybrid RRF (semantic + keyword); returns `rrf_score`, `conversation_created_at`
-- `POST /search/semantic` — pgvector cosine similarity only; returns `score` (0–1), `conversation_created_at`; supports `threshold`
-- `POST /search/keyword` — tsvector `ts_rank` only; returns `score`, `conversation_created_at`
-- `POST /search/rag` — HyDE + hybrid search (assistant chunks only) + LLM reranking; returns `{ hypothetical_answer, chunks: RankedChunk[] }`
-- `POST /search/rag/messages` — same pipeline; returns single `MessagePair | null` (best score ≥ 8 only)
-- `_rag_retrieve(query, limit, db)` — shared helper: HyDE → embed → `_HYBRID_SEARCH_ASSISTANT_SQL` → rerank → fetch full messages; returns `MessagePair | None`
-- `_HYBRID_SEARCH_SQL` / `_HYBRID_SEARCH_ASSISTANT_SQL` — RRF SQL constants; assistant variant filters `metadata->>'role' = 'assistant'`
-- `RagSearchRequest` — Pydantic model `{ query, limit=10 }`
-- `RankedChunk` — Pydantic model `{ id, content, conversation_title, conversation_created_at, metadata, rrf_score, relevance_score }`
-- `RagSearchResponse` — Pydantic model `{ hypothetical_answer, chunks }`
-- `MessagePair` — Pydantic model `{ message_id, user_message, assistant_message, relevance_score, conversation_title, conversation_created_at }`
-- `lifespan` — opens/closes asyncpg pool with `register_vector`
+Key symbols:
+- `llm.py`: `llm`, `embeddings_model`, `graph`
+- `db.py`: `chunk_text(text)`, `save_chunks(db, collection, content, metadata)`, `encode_cursor(*parts)`, `decode_cursor(cursor)`
+- `rag.py`: `rag_retrieve(query, limit, db)` — HyDE → embed → hybrid search (assistant only) → LLM rerank → fetch full messages; returns `MessagePair | None` (threshold: score ≥ 8)
+- `models.py`: `Message`, `ChatRequest`, `ConversationCreate`, `SearchRequest`, `RagSearchRequest`, `RankedChunk`, `RagSearchResponse`, `MessagePair`
+- `sql.py`: `HYBRID_SEARCH_SQL`, `HYBRID_SEARCH_ASSISTANT_SQL` — RRF fusion; assistant variant filters `metadata->>'role' = 'assistant'`
+- Endpoints: same as before — `GET /conversations`, `POST /conversations`, `DELETE /conversations/{id}`, `GET /conversations/{id}/messages`, `POST /chat`, `POST /search`, `POST /search/semantic`, `POST /search/keyword`, `POST /search/rag`, `POST /search/rag/messages`
 
 ## Frontend structure
 
 ```
-frontend/src/app/
-  page.tsx    — single "use client" page; sidebar + chat UI + SSE streaming
-  layout.tsx  — root layout; sets <title>Hanet Chat</title>
-  globals.css — Tailwind base styles
+frontend/src/
+  app/
+    page.tsx        — wires hooks + components; owns hoveredId (~80 lines)
+    layout.tsx      — root layout; sets <title>Hanet Chat</title>
+    globals.css     — Tailwind base styles
+  types/
+    index.ts        — Message, Conversation, SearchResult interfaces
+  lib/
+    api.ts          — API_URL constant
+  hooks/
+    useConversations.ts  — conversations[], convNextCursor/HasMore, fetchConversations, createConversation, deleteConversation
+    useMessages.ts       — activeId, messages, msgHasOlder, loadMessages, loadOlderMessages, resetMessages; owns all scroll refs
+    useChat.ts           — input, isStreaming, sendMessage, textareaRef; auto-resize effect
+    useSearch.ts         — searchOpen, searchQuery, searchResults, searchLoading, runSearch, goToResult; Escape + focus effects
+  components/
+    Sidebar.tsx      — pure props; renders conversation list, new chat button, search toggle
+    SearchModal.tsx  — pure props; renders search overlay
+    MessageList.tsx  — pure props; renders messages + load-older button
+    ChatInput.tsx    — pure props; renders textarea + send button
 ```
 
-Key symbols in `frontend/src/app/page.tsx`:
-- `Message` — interface `{ id?, role: "user" | "assistant", content: string }`
-- `Conversation` — interface `{ id, title, created_at }`
-- `SearchResult` — interface `{ id, content, conversation_title, conversation_created_at, metadata: { conversation_id, message_id, role }, rrf_score }`
-- `API_URL` — `"http://localhost:8000"`
-- `ChatPage` — default export; owns all state
-- `messages` — `useState<Message[]>` — active conversation messages (current page + live session)
-- `conversations` — `useState<Conversation[]>` — sidebar list (current page)
-- `activeId` — `useState<string | null>` — selected conversation id
-- `hoveredId` — `useState<string | null>` — controls delete button visibility
-- `searchOpen` — `useState<boolean>` — controls search modal visibility
-- `searchQuery` / `searchResults` / `searchLoading` — search modal state
-- `convNextCursor` / `convHasMore` — cursor pagination state for conversations sidebar
-- `msgPrevCursor` / `msgHasOlder` — cursor pagination state for messages (older pages)
-- `targetMessageIdRef` — `useRef<string | null>` — message id to scroll to after conversation loads
-- `messagesContainerRef` — `useRef<HTMLDivElement>` — ref to scrollable messages div; used to read/restore `scrollHeight` when prepending older messages
-- `scrollRestoreRef` — `useRef<number | null>` — captures `scrollHeight` before prepend; consumed by scroll `useEffect` to restore `scrollTop`
-- `fetchConversations(cursor?)` — refreshes/appends sidebar; no cursor = reset list
-- `selectConversation(id, loadAll?)` — loads paginated messages; `loadAll=true` fetches all (used by search navigation)
-- `loadOlderMessages()` — fetches previous page, prepends to `messages`, restores scroll position
-- `newChat()` — clears state and cursor state, no active conversation
-- `deleteConversation(e, id)` — deletes and refreshes sidebar
-- `runSearch()` — POSTs to `/search` with current query, updates `searchResults`
-- `goToResult(result)` — closes modal, sets `targetMessageIdRef`, calls `selectConversation(..., true)`
-- `sendMessage()` — creates conversation if needed, posts `{ message, conversation_id }` to `/chat`, reads SSE
-- `handleKeyDown()` — Enter sends, Shift+Enter newline
-- scroll effect — single `useEffect([messages])`: restores scroll after prepend if `scrollRestoreRef` set; else scrolls to `targetMessageIdRef` with highlight; else scrolls to bottom
+Key wiring in `page.tsx`:
+- `useMessages` owns `activeId`; `selectConversation(id, loadAll?)` calls `loadMessages`
+- `useSearch` receives `onGoToResult(conversationId, messageId)` — sets `targetMessageIdRef.current` then calls `selectConversation`
+- `useChat` receives `onCreateConversation`, `onSetActiveId`, `onAfterSend` callbacks
 
 ## Changelog
 See `CHANGELOG.md` for full session-by-session history.
