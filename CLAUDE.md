@@ -3,8 +3,8 @@
 ## Current state
 Streaming chat with persistent conversation history, hybrid search, and search-to-message navigation. PostgreSQL stores conversations, messages, and document chunks with embeddings. Sidebar lists past conversations. UI is dark mode (gray-900 background, Tailwind utility classes in `page.tsx`).
 
-## Last session recap — 2026-05-15
-Moved context window control to backend and added cursor pagination. Backend now owns history: `POST /chat` accepts `{ message, conversation_id }`, saves the user message, then fetches the 10 most recent messages from DB for LLM context. `GET /conversations` and `GET /conversations/{id}/messages` both use keyset cursor pagination (10/page); messages endpoint supports `?limit=0` to bypass pagination for search navigation. Frontend: `sendMessage` sends only the current message string; sidebar has "Load more" for conversations; chat area has "Load older messages" that prepends and restores scroll position.
+## Last session recap — 2026-05-18
+Added RAG retrieval pipeline (HyDE + hybrid search + LLM reranking) to the backend. Three new endpoints: `POST /search/rag` returns ranked chunks with `relevance_score`; `POST /search/rag/messages` returns a single best `MessagePair` (assistant message + preceding user message) or `null` when best score < 8; both search only `role='assistant'` chunks. Shared logic lives in `_rag_retrieve(query, limit, db)`. `POST /chat` now calls `_rag_retrieve` before building the LLM context — if a relevant pair is found and its `message_id` is not already in the 10 most recent messages, it is prepended to `lc_messages` as a priming Q&A pair.
 
 ## Stack
 - **Frontend:** Next.js 15, TypeScript, Tailwind CSS (`frontend/`)
@@ -80,10 +80,18 @@ Key symbols in `backend/main.py`:
 - `POST /conversations` — create blank conversation
 - `DELETE /conversations/{id}` — cascade delete
 - `GET /conversations/{id}/messages` — paginated history; params: `cursor`, `limit=10` (`limit=0` = all); returns `{ items, prev_cursor }`; newest-10 by default, reversed to oldest-first
-- `POST /chat` — accepts `{ message, conversation_id }`; saves user msg, fetches 10 latest from DB for context, streams SSE; persist assistant reply; chunk + embed after `[DONE]`
+- `POST /chat` — accepts `{ message, conversation_id }`; saves user msg, fetches 10 latest from DB for context, calls `_rag_retrieve` and prepends RAG pair if relevant and not already in context, streams SSE; persist assistant reply; chunk + embed after `[DONE]`
 - `POST /search` — hybrid RRF (semantic + keyword); returns `rrf_score`, `conversation_created_at`
 - `POST /search/semantic` — pgvector cosine similarity only; returns `score` (0–1), `conversation_created_at`; supports `threshold`
 - `POST /search/keyword` — tsvector `ts_rank` only; returns `score`, `conversation_created_at`
+- `POST /search/rag` — HyDE + hybrid search (assistant chunks only) + LLM reranking; returns `{ hypothetical_answer, chunks: RankedChunk[] }`
+- `POST /search/rag/messages` — same pipeline; returns single `MessagePair | null` (best score ≥ 8 only)
+- `_rag_retrieve(query, limit, db)` — shared helper: HyDE → embed → `_HYBRID_SEARCH_ASSISTANT_SQL` → rerank → fetch full messages; returns `MessagePair | None`
+- `_HYBRID_SEARCH_SQL` / `_HYBRID_SEARCH_ASSISTANT_SQL` — RRF SQL constants; assistant variant filters `metadata->>'role' = 'assistant'`
+- `RagSearchRequest` — Pydantic model `{ query, limit=10 }`
+- `RankedChunk` — Pydantic model `{ id, content, conversation_title, conversation_created_at, metadata, rrf_score, relevance_score }`
+- `RagSearchResponse` — Pydantic model `{ hypothetical_answer, chunks }`
+- `MessagePair` — Pydantic model `{ message_id, user_message, assistant_message, relevance_score, conversation_title, conversation_created_at }`
 - `lifespan` — opens/closes asyncpg pool with `register_vector`
 
 ## Frontend structure

@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -110,6 +111,194 @@ class SearchRequest(BaseModel):
     threshold: float | None = None  # min cosine similarity (0–1), semantic only
 
 
+class RagSearchRequest(BaseModel):
+    query: str
+    limit: int = 10
+
+
+class RankedChunk(BaseModel):
+    id: str
+    content: str
+    conversation_title: str
+    conversation_created_at: str
+    metadata: dict
+    rrf_score: float
+    relevance_score: float
+
+
+class RagSearchResponse(BaseModel):
+    hypothetical_answer: str
+    chunks: list[RankedChunk]
+
+
+class MessagePair(BaseModel):
+    message_id: str
+    user_message: str | None
+    assistant_message: str
+    relevance_score: float
+    conversation_title: str
+    conversation_created_at: str
+
+
+_HYBRID_SEARCH_SQL = """
+    WITH semantic AS (
+        SELECT d.id,
+               ROW_NUMBER() OVER (ORDER BY d.embedding <=> $1::vector) AS rank
+        FROM documents d
+        WHERE d.embedding IS NOT NULL
+          AND d.collection = 'message'
+        ORDER BY d.embedding <=> $1::vector
+        LIMIT 50
+    ),
+    keyword AS (
+        SELECT d.id,
+               ROW_NUMBER() OVER (ORDER BY ts_rank(d.fts, query) DESC) AS rank
+        FROM documents d, plainto_tsquery('english', $2) query
+        WHERE d.fts @@ query
+          AND d.collection = 'message'
+        ORDER BY rank
+        LIMIT 50
+    ),
+    fused AS (
+        SELECT
+            COALESCE(s.id, k.id) AS id,
+            COALESCE(1.0 / (60 + s.rank), 0.0) +
+            COALESCE(1.0 / (60 + k.rank), 0.0) AS rrf_score
+        FROM semantic s
+        FULL OUTER JOIN keyword k USING (id)
+    )
+    SELECT
+        f.id,
+        d.content,
+        d.metadata,
+        c.title AS conversation_title,
+        c.created_at AS conversation_created_at,
+        f.rrf_score
+    FROM fused f
+    JOIN documents d ON d.id = f.id
+    JOIN conversations c ON c.id = (d.metadata->>'conversation_id')::uuid
+    ORDER BY f.rrf_score DESC
+    LIMIT $3
+"""
+
+_HYBRID_SEARCH_ASSISTANT_SQL = """
+    WITH semantic AS (
+        SELECT d.id,
+               ROW_NUMBER() OVER (ORDER BY d.embedding <=> $1::vector) AS rank
+        FROM documents d
+        WHERE d.embedding IS NOT NULL
+          AND d.collection = 'message'
+          AND d.metadata->>'role' = 'assistant'
+        ORDER BY d.embedding <=> $1::vector
+        LIMIT 50
+    ),
+    keyword AS (
+        SELECT d.id,
+               ROW_NUMBER() OVER (ORDER BY ts_rank(d.fts, query) DESC) AS rank
+        FROM documents d, plainto_tsquery('english', $2) query
+        WHERE d.fts @@ query
+          AND d.collection = 'message'
+          AND d.metadata->>'role' = 'assistant'
+        ORDER BY rank
+        LIMIT 50
+    ),
+    fused AS (
+        SELECT
+            COALESCE(s.id, k.id) AS id,
+            COALESCE(1.0 / (60 + s.rank), 0.0) +
+            COALESCE(1.0 / (60 + k.rank), 0.0) AS rrf_score
+        FROM semantic s
+        FULL OUTER JOIN keyword k USING (id)
+    )
+    SELECT
+        f.id,
+        d.content,
+        d.metadata,
+        c.title AS conversation_title,
+        c.created_at AS conversation_created_at,
+        f.rrf_score
+    FROM fused f
+    JOIN documents d ON d.id = f.id
+    JOIN conversations c ON c.id = (d.metadata->>'conversation_id')::uuid
+    ORDER BY f.rrf_score DESC
+    LIMIT $3
+"""
+
+
+async def _rag_retrieve(query: str, limit: int, db) -> MessagePair | None:
+    hyde_response = await llm.ainvoke(
+        [
+            {
+                "role": "user",
+                "content": f"Write a concise answer to the following question:\n\n{query}",
+            }
+        ]
+    )
+    query_embedding = await embeddings_model.aembed_query(hyde_response.content)
+    rows = await db.fetch(_HYBRID_SEARCH_ASSISTANT_SQL, query_embedding, query, limit)
+    if not rows:
+        return None
+
+    chunks_text = "\n\n".join(f"[{i + 1}] {r['content']}" for i, r in enumerate(rows))
+    rerank_response = await llm.ainvoke(
+        [
+            {
+                "role": "user",
+                "content": (
+                    f"Query: {query}\n\n"
+                    f"Rate each passage 0–10 for relevance to the query. "
+                    f"Reply ONLY with a JSON array of numbers, one per passage, in the same order.\n\n"
+                    f"{chunks_text}"
+                ),
+            }
+        ]
+    )
+    try:
+        match = re.search(r"\[[\d\s.,]+\]", rerank_response.content)
+        if not match:
+            raise ValueError("no JSON array")
+        scores = [float(s) for s in json.loads(match.group())]
+        if len(scores) != len(rows):
+            raise ValueError("score count mismatch")
+    except (json.JSONDecodeError, ValueError):
+        scores = [float(r["rrf_score"]) for r in rows]
+
+    ranked = sorted(zip(rows, scores), key=lambda x: x[1], reverse=True)
+    best_row, best_score = ranked[0]
+    if best_score < 8:
+        return None
+
+    meta = (
+        best_row["metadata"]
+        if isinstance(best_row["metadata"], dict)
+        else json.loads(best_row["metadata"])
+    )
+    msg_id = meta.get("message_id")
+    conv_id = meta.get("conversation_id")
+
+    asst_row = await db.fetchrow(
+        "SELECT content FROM messages WHERE id = $1::uuid", msg_id
+    )
+    asst_content = asst_row["content"] if asst_row else best_row["content"]
+
+    user_row = await db.fetchrow(
+        """SELECT content FROM messages
+           WHERE conversation_id = $1::uuid AND role = 'user'
+             AND created_at < (SELECT created_at FROM messages WHERE id = $2::uuid)
+           ORDER BY created_at DESC LIMIT 1""",
+        conv_id,
+        msg_id,
+    )
+    return MessagePair(
+        message_id=msg_id,
+        user_message=user_row["content"] if user_row else None,
+        assistant_message=asst_content,
+        relevance_score=best_score,
+        conversation_title=best_row["conversation_title"],
+        conversation_created_at=best_row["conversation_created_at"].isoformat(),
+    )
+
+
 # ── Conversation endpoints ────────────────────────────────────────────────────
 
 @app.get("/conversations")
@@ -204,7 +393,86 @@ async def get_messages(conversation_id: str, cursor: str | None = None, limit: i
     }
 
 
-# ── Search endpoint ───────────────────────────────────────────────────────────
+# ── Search endpoints ──────────────────────────────────────────────────────────
+
+
+@app.post("/search/rag", response_model=RagSearchResponse)
+async def rag_search(body: RagSearchRequest):
+    if not body.query.strip():
+        return RagSearchResponse(hypothetical_answer="", chunks=[])
+
+    hyde_response = await llm.ainvoke(
+        [
+            {
+                "role": "user",
+                "content": f"Write a concise answer to the following question:\n\n{body.query}",
+            }
+        ]
+    )
+    hypothetical_answer = hyde_response.content
+
+    query_embedding = await embeddings_model.aembed_query(hypothetical_answer)
+    rows = await app.state.db.fetch(
+        _HYBRID_SEARCH_ASSISTANT_SQL, query_embedding, body.query, body.limit
+    )
+
+    if not rows:
+        return RagSearchResponse(hypothetical_answer=hypothetical_answer, chunks=[])
+
+    chunks_text = "\n\n".join(f"[{i + 1}] {r['content']}" for i, r in enumerate(rows))
+    rerank_response = await llm.ainvoke(
+        [
+            {
+                "role": "user",
+                "content": (
+                    f"Query: {body.query}\n\n"
+                    f"Rate each passage 0–10 for relevance to the query. "
+                    f"Reply ONLY with a JSON array of numbers, one per passage, in the same order.\n\n"
+                    f"{chunks_text}"
+                ),
+            }
+        ]
+    )
+
+    try:
+        print("rerank response", rerank_response.content)
+        match = re.search(r"\[[\d\s.,]+\]", rerank_response.content)
+        if not match:
+            raise ValueError("no JSON array in rerank response")
+        scores = json.loads(match.group())
+        if not isinstance(scores, list) or len(scores) != len(rows):
+            raise ValueError("score count mismatch")
+        scores = [float(s) for s in scores]
+    except (json.JSONDecodeError, ValueError):
+        scores = [float(r["rrf_score"]) for r in rows]
+
+    ranked = sorted(zip(rows, scores), key=lambda x: x[1], reverse=True)
+
+    return RagSearchResponse(
+        hypothetical_answer=hypothetical_answer,
+        chunks=[
+            RankedChunk(
+                id=str(r["id"]),
+                content=r["content"],
+                conversation_title=r["conversation_title"],
+                conversation_created_at=r["conversation_created_at"].isoformat(),
+                metadata=json.loads(r["metadata"])
+                if isinstance(r["metadata"], str)
+                else dict(r["metadata"]),
+                rrf_score=float(r["rrf_score"]),
+                relevance_score=score,
+            )
+            for r, score in ranked
+        ],
+    )
+
+
+@app.post("/search/rag/messages")
+async def rag_search_messages(body: RagSearchRequest) -> MessagePair | None:
+    if not body.query.strip():
+        return None
+    return await _rag_retrieve(body.query, body.limit, app.state.db)
+
 
 @app.post("/search")
 async def search(body: SearchRequest):
@@ -214,49 +482,7 @@ async def search(body: SearchRequest):
     query_embedding = await embeddings_model.aembed_query(body.query)
 
     rows = await app.state.db.fetch(
-        """
-        WITH semantic AS (
-            SELECT d.id,
-                   ROW_NUMBER() OVER (ORDER BY d.embedding <=> $1::vector) AS rank
-            FROM documents d
-            WHERE d.embedding IS NOT NULL
-              AND d.collection = 'message'
-            ORDER BY d.embedding <=> $1::vector
-            LIMIT 50
-        ),
-        keyword AS (
-            SELECT d.id,
-                   ROW_NUMBER() OVER (ORDER BY ts_rank(d.fts, query) DESC) AS rank
-            FROM documents d, plainto_tsquery('english', $2) query
-            WHERE d.fts @@ query
-              AND d.collection = 'message'
-            ORDER BY rank
-            LIMIT 50
-        ),
-        fused AS (
-            SELECT
-                COALESCE(s.id, k.id) AS id,
-                COALESCE(1.0 / (60 + s.rank), 0.0) +
-                COALESCE(1.0 / (60 + k.rank), 0.0) AS rrf_score
-            FROM semantic s
-            FULL OUTER JOIN keyword k USING (id)
-        )
-        SELECT
-            f.id,
-            d.content,
-            d.metadata,
-            c.title AS conversation_title,
-            c.created_at AS conversation_created_at,
-            f.rrf_score
-        FROM fused f
-        JOIN documents d ON d.id = f.id
-        JOIN conversations c ON c.id = (d.metadata->>'conversation_id')::uuid
-        ORDER BY f.rrf_score DESC
-        LIMIT $3
-        """,
-        query_embedding,
-        body.query,
-        body.limit,
+        _HYBRID_SEARCH_SQL, query_embedding, body.query, body.limit
     )
 
     return [
@@ -368,15 +594,28 @@ async def chat(body: ChatRequest):
 
     # Build context from the 10 most recent messages in the DB (includes the user message just saved)
     ctx_rows = await app.state.db.fetch(
-        """SELECT role, content FROM messages
+        """SELECT id, role, content FROM messages
            WHERE conversation_id = $1::uuid
            ORDER BY created_at DESC LIMIT 10""",
         conv_id,
     )
     ctx_rows = list(reversed(ctx_rows))
 
-    lc_messages = [SystemMessage(content="You are a helpful assistant.")] + [
-        HumanMessage(content=r["content"]) if r["role"] == "user" else AIMessage(content=r["content"])
+    rag_pair = await _rag_retrieve(body.message, 5, app.state.db)
+
+    ctx_ids = {str(r["id"]) for r in ctx_rows}
+    inject_rag = (
+        rag_pair and rag_pair.user_message and rag_pair.message_id not in ctx_ids
+    )
+
+    lc_messages = [SystemMessage(content="You are a helpful assistant.")]
+    if inject_rag:
+        lc_messages.append(HumanMessage(content=rag_pair.user_message))
+        lc_messages.append(AIMessage(content=rag_pair.assistant_message))
+    lc_messages += [
+        HumanMessage(content=r["content"])
+        if r["role"] == "user"
+        else AIMessage(content=r["content"])
         for r in ctx_rows
     ]
 
