@@ -1,3 +1,5 @@
+from typing import TypedDict
+
 from pydantic import BaseModel
 
 
@@ -41,10 +43,6 @@ class RagSearchResponse(BaseModel):
     chunks: list[RankedChunk]
 
 
-class MessagePair(BaseModel):
-    message_id: str
-    user_message: str | None
-    assistant_message: str
-    relevance_score: float
-    conversation_title: str
-    conversation_created_at: str
+
+class RAGRouterDecision(TypedDict):
+    should_retrieve: bool

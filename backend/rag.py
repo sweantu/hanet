@@ -1,19 +1,15 @@
 import json
 import re
 
-from models import MessagePair
-from llm import llm, embeddings_model
+from llm import embeddings_model, llm
 from sql import HYBRID_SEARCH_ASSISTANT_SQL
 
 
-async def rag_retrieve(query: str, limit: int, db) -> MessagePair | None:
-    hyde_response = await llm.ainvoke(
-        [{"role": "user", "content": f"Write a concise answer to the following question:\n\n{query}"}]
-    )
-    query_embedding = await embeddings_model.aembed_query(hyde_response.content)
+async def rag_retrieve(query: str, limit: int, db) -> list[str]:
+    query_embedding = await embeddings_model.aembed_query(query)
     rows = await db.fetch(HYBRID_SEARCH_ASSISTANT_SQL, query_embedding, query, limit)
     if not rows:
-        return None
+        return []
 
     chunks_text = "\n\n".join(f"[{i + 1}] {r['content']}" for i, r in enumerate(rows))
     rerank_response = await llm.ainvoke(
@@ -40,34 +36,27 @@ async def rag_retrieve(query: str, limit: int, db) -> MessagePair | None:
         scores = [float(r["rrf_score"]) for r in rows]
 
     ranked = sorted(zip(rows, scores), key=lambda x: x[1], reverse=True)
-    best_row, best_score = ranked[0]
-    if best_score < 8:
-        return None
 
-    meta = (
-        best_row["metadata"]
-        if isinstance(best_row["metadata"], dict)
-        else json.loads(best_row["metadata"])
-    )
-    msg_id = meta.get("message_id")
-    conv_id = meta.get("conversation_id")
+    qualifying: list[tuple] = []
+    for row, score in ranked:
+        if score < 8:
+            continue
+        meta = (
+            row["metadata"]
+            if isinstance(row["metadata"], dict)
+            else json.loads(row["metadata"])
+        )
+        qualifying.append((meta.get("message_id"), row["content"]))
 
-    asst_row = await db.fetchrow("SELECT content FROM messages WHERE id = $1::uuid", msg_id)
-    asst_content = asst_row["content"] if asst_row else best_row["content"]
+    if not qualifying:
+        return []
 
-    user_row = await db.fetchrow(
-        """SELECT content FROM messages
-           WHERE conversation_id = $1::uuid AND role = 'user'
-             AND created_at < (SELECT created_at FROM messages WHERE id = $2::uuid)
-           ORDER BY created_at DESC LIMIT 1""",
-        conv_id,
-        msg_id,
+    msg_ids = [q[0] for q in qualifying]
+    fallbacks = {q[0]: q[1] for q in qualifying}
+
+    fetched = await db.fetch(
+        "SELECT id::text, content FROM messages WHERE id = ANY($1::uuid[])", msg_ids
     )
-    return MessagePair(
-        message_id=msg_id,
-        user_message=user_row["content"] if user_row else None,
-        assistant_message=asst_content,
-        relevance_score=best_score,
-        conversation_title=best_row["conversation_title"],
-        conversation_created_at=best_row["conversation_created_at"].isoformat(),
-    )
+    content_by_id = {r["id"]: r["content"] for r in fetched}
+
+    return [content_by_id.get(msg_id, fallbacks[msg_id]) for msg_id in msg_ids]

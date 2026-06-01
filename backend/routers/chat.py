@@ -4,10 +4,9 @@ from db import save_chunks
 from dependencies import get_db
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
+from graph import graph
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from llm import graph
 from models import ChatRequest
-from rag import rag_retrieve
 
 router = APIRouter(tags=["chat"])
 
@@ -41,16 +40,7 @@ async def chat(body: ChatRequest, db=Depends(get_db)):
     )
     ctx_rows = list(reversed(ctx_rows))
 
-    rag_pair = await rag_retrieve(body.message, 5, db)
-    ctx_ids = {str(r["id"]) for r in ctx_rows}
-    inject_rag = (
-        rag_pair and rag_pair.user_message and rag_pair.message_id not in ctx_ids
-    )
-
     lc_messages = [SystemMessage(content="You are a helpful assistant.")]
-    if inject_rag:
-        lc_messages.append(HumanMessage(content=rag_pair.user_message))
-        lc_messages.append(AIMessage(content=rag_pair.assistant_message))
     lc_messages += [
         HumanMessage(content=r["content"])
         if r["role"] == "user"
@@ -61,9 +51,13 @@ async def chat(body: ChatRequest, db=Depends(get_db)):
     async def generate():
         full_response: list[str] = []
         async for event in graph.astream_events(
-            {"messages": lc_messages}, version="v2"
+            {"messages": lc_messages, "db": db, "rag_messages": [], "should_retrieve": False},
+            version="v2",
         ):
-            if event["event"] == "on_chat_model_stream":
+            if (
+                event["event"] == "on_chat_model_stream"
+                and event.get("metadata", {}).get("langgraph_node") == "agent"
+            ):
                 chunk = event["data"]["chunk"]
                 if chunk.content:
                     full_response.append(chunk.content)

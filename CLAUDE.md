@@ -3,8 +3,8 @@
 ## Current state
 Streaming chat with persistent conversation history, hybrid search, and search-to-message navigation. PostgreSQL stores conversations, messages, and document chunks with embeddings. Sidebar lists past conversations. UI is dark mode (gray-900 background, Tailwind CSS). Both backend and frontend are separated by feature into focused modules.
 
-## Last session recap — 2026-05-18
-Refactored backend and frontend by feature. Backend: `main.py` split into `llm.py`, `models.py`, `sql.py`, `db.py`, `rag.py`, `dependencies.py`, and `routers/` (conversations, chat, search). `load_dotenv()` moved to `llm.py` so it runs before OpenAI clients are constructed. Frontend: `page.tsx` split into `types/index.ts`, `lib/api.ts`, four hooks (`useConversations`, `useMessages`, `useChat`, `useSearch`), and four components (`Sidebar`, `SearchModal`, `MessageList`, `ChatInput`). No behaviour changes.
+## Last session recap — 2026-06-01
+Added LangGraph RAG router to the chat pipeline. `llm.py` stripped to primitives only (`llm`, `embeddings_model`). New `graph.py` extends the LangGraph graph to three nodes: `route_intent` (LLM structured-output classifier — returns `should_retrieve: bool`), `retrieve_rag` (calls `rag_retrieve` only when needed), `agent` (injects retrieved context into system prompt then calls LLM). Conditional edge: `route_intent → retrieve_rag → agent` or `route_intent → agent`. RAG retrieval simplified: HyDE removed (user query embedded directly); `rag_retrieve` now returns `list[str]` (top assistant messages scoring ≥ 8) instead of a single `MessagePair`; qualifying messages batch-fetched in one query. Retrieved context injected as additional system prompt text, not as fake conversation turns. `MessagePair` model deleted.
 
 ## Stack
 - **Frontend:** Next.js 15, TypeScript, Tailwind CSS (`frontend/`)
@@ -34,7 +34,7 @@ cd frontend && npm install && npm run dev
 **Backend**
 - `POST /chat` receives `{ messages: [...], conversation_id? }`, streams SSE tokens back
 - After stream completes, persists assistant reply, updates `conversations.updated_at`, then chunks + embeds both messages into `documents`
-- LangGraph graph: `START → agent → END`; single node calls `llm.invoke`
+- LangGraph graph: `START → route_intent → [conditional] → retrieve_rag → agent → END` or `→ agent → END`; `route_intent` classifies user intent with structured output; `retrieve_rag` runs only on retrieval intent; `agent` optionally injects RAG context into system prompt
 - SSE format: `data: {"text": "..."}` lines, terminated by `data: [DONE]`
 - DB pool created on startup via `asyncpg.create_pool(init=register_vector)` (FastAPI `lifespan`)
 - Chunking: `tiktoken` with `cl100k_base` encoder, 512-token window, 64-token overlap (`chunk_text`)
@@ -53,11 +53,13 @@ cd frontend && npm install && npm run dev
 ```
 backend/
   main.py               — FastAPI app + asyncpg lifespan + CORS + include_router (~30 lines)
-  llm.py                — llm, embeddings_model, LangGraph graph; calls load_dotenv()
+  main.py               — FastAPI app + asyncpg lifespan + CORS + include_router (~30 lines)
+  llm.py                — llm, embeddings_model primitives; calls load_dotenv()
+  graph.py              — LangGraph ChatState + route_intent / retrieve_rag / agent nodes; exports graph
   models.py             — all Pydantic models
   sql.py                — HYBRID_SEARCH_SQL, HYBRID_SEARCH_ASSISTANT_SQL constants
   db.py                 — chunk_text, save_chunks, encode_cursor, decode_cursor
-  rag.py                — rag_retrieve(query, limit, db) → MessagePair | None
+  rag.py                — rag_retrieve(query, limit, db) → list[str]
   dependencies.py       — get_db(request) FastAPI dependency
   requirements.txt      — langgraph, langchain-openai, fastapi, uvicorn, asyncpg, alembic,
                           sqlalchemy, greenlet, pgvector, tiktoken
@@ -76,10 +78,11 @@ backend/
 ```
 
 Key symbols:
-- `llm.py`: `llm`, `embeddings_model`, `graph`
+- `llm.py`: `llm`, `embeddings_model`
+- `graph.py`: `graph` (compiled LangGraph); `ChatState` (messages, db, rag_messages, should_retrieve); `RAGRouterDecision` TypedDict
 - `db.py`: `chunk_text(text)`, `save_chunks(db, collection, content, metadata)`, `encode_cursor(*parts)`, `decode_cursor(cursor)`
-- `rag.py`: `rag_retrieve(query, limit, db)` — HyDE → embed → hybrid search (assistant only) → LLM rerank → fetch full messages; returns `MessagePair | None` (threshold: score ≥ 8)
-- `models.py`: `Message`, `ChatRequest`, `ConversationCreate`, `SearchRequest`, `RagSearchRequest`, `RankedChunk`, `RagSearchResponse`, `MessagePair`
+- `rag.py`: `rag_retrieve(query, limit, db)` — embed query → hybrid search (assistant only) → LLM rerank → batch-fetch full messages; returns `list[str]` (threshold: score ≥ 8)
+- `models.py`: `Message`, `ChatRequest`, `ConversationCreate`, `SearchRequest`, `RagSearchRequest`, `RankedChunk`, `RagSearchResponse`, `RAGRouterDecision`
 - `sql.py`: `HYBRID_SEARCH_SQL`, `HYBRID_SEARCH_ASSISTANT_SQL` — RRF fusion; assistant variant filters `metadata->>'role' = 'assistant'`
 - Endpoints: same as before — `GET /conversations`, `POST /conversations`, `DELETE /conversations/{id}`, `GET /conversations/{id}/messages`, `POST /chat`, `POST /search`, `POST /search/semantic`, `POST /search/keyword`, `POST /search/rag`, `POST /search/rag/messages`
 
@@ -118,3 +121,4 @@ See `CHANGELOG.md` for full session-by-session history.
 ## Planned next steps
 - Add tools/agents to the LangGraph graph
 - Rename conversations from the sidebar
+

@@ -1,10 +1,9 @@
 import json
 
-from fastapi import APIRouter, Depends
-
 from dependencies import get_db
+from fastapi import APIRouter, Depends
 from llm import embeddings_model, llm
-from models import MessagePair, RagSearchRequest, RagSearchResponse, RankedChunk, SearchRequest
+from models import RagSearchRequest, RagSearchResponse, RankedChunk, SearchRequest
 from rag import rag_retrieve
 from sql import HYBRID_SEARCH_ASSISTANT_SQL, HYBRID_SEARCH_SQL
 
@@ -42,7 +41,6 @@ async def rag_search(body: RagSearchRequest, db=Depends(get_db)):
         ]
     )
     try:
-        print("rerank response", rerank_response.content)
         match = re.search(r"\[[\d\s.,]+\]", rerank_response.content)
         if not match:
             raise ValueError("no JSON array in rerank response")
@@ -72,9 +70,9 @@ async def rag_search(body: RagSearchRequest, db=Depends(get_db)):
 
 
 @router.post("/rag/messages")
-async def rag_search_messages(body: RagSearchRequest, db=Depends(get_db)) -> MessagePair | None:
+async def rag_search_messages(body: RagSearchRequest, db=Depends(get_db)) -> list[str]:
     if not body.query.strip():
-        return None
+        return []
     return await rag_retrieve(body.query, body.limit, db)
 
 
