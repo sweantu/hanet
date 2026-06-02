@@ -51,7 +51,7 @@ async def chat(body: ChatRequest, db=Depends(get_db)):
     async def generate():
         full_response: list[str] = []
         async for event in graph.astream_events(
-            {"messages": lc_messages, "db": db, "rag_messages": [], "should_retrieve": False},
+            {"messages": lc_messages, "db": db},
             version="v2",
         ):
             if (

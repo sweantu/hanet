@@ -42,7 +42,3 @@ class RagSearchResponse(BaseModel):
     hypothetical_answer: str
     chunks: list[RankedChunk]
 
-
-
-class RAGRouterDecision(TypedDict):
-    should_retrieve: bool

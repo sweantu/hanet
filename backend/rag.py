@@ -5,7 +5,7 @@ from llm import embeddings_model, llm
 from sql import HYBRID_SEARCH_ASSISTANT_SQL
 
 
-async def rag_retrieve(query: str, limit: int, db) -> list[str]:
+async def search_database_impl(query: str, limit: int, db) -> list[str]:
     query_embedding = await embeddings_model.aembed_query(query)
     rows = await db.fetch(HYBRID_SEARCH_ASSISTANT_SQL, query_embedding, query, limit)
     if not rows:

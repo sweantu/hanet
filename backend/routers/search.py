@@ -4,7 +4,7 @@ from dependencies import get_db
 from fastapi import APIRouter, Depends
 from llm import embeddings_model, llm
 from models import RagSearchRequest, RagSearchResponse, RankedChunk, SearchRequest
-from rag import rag_retrieve
+from rag import search_database_impl as rag_retrieve
 from sql import HYBRID_SEARCH_ASSISTANT_SQL, HYBRID_SEARCH_SQL
 
 router = APIRouter(prefix="/search", tags=["search"])
