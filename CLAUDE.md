@@ -4,7 +4,7 @@
 Streaming chat with persistent conversation history, hybrid search, and search-to-message navigation. PostgreSQL stores conversations, messages, and document chunks with embeddings. Sidebar lists past conversations. UI is dark mode (gray-900 background, Tailwind CSS). Both backend and frontend are separated by feature into focused modules.
 
 ## Last session recap — 2026-06-02
-Replaced the LangGraph intent-router pattern with a ReAct tool-calling loop. `graph.py` rebuilt: `ChatState` simplified to `messages` + `db`; `route_intent`, `retrieve_rag`, `_call_model`, and `_route_edge` removed; two `@tool` functions added — `search_database` (wraps `search_database_impl`, receives `db` via `InjectedState`) and `search_web` (Tavily); LLM bound with tools via `llm.bind_tools()`; graph is now `START → agent → tools_condition → tools → agent` (ReAct loop) or `→ END`. RAG context no longer injected into the system prompt — tool results flow through message history naturally. `rag.py`: `rag_retrieve` renamed to `search_database_impl`. `models.py`: `RAGRouterDecision` removed. `requirements.txt`: added `tavily-python`. `routers/chat.py`: removed `rag_messages`/`should_retrieve` from initial graph state. `routers/search.py`: updated import alias.
+Updated `documents` table and insert logic. Migration `0003_update_documents`: dropped `GENERATED ALWAYS AS ... STORED` from `fts` via `ALTER TABLE documents ALTER COLUMN fts DROP EXPRESSION` (preserves data/index); added `keywords TEXT[] NOT NULL DEFAULT '{}'`. `db.py`: `save_chunks` gains optional `keywords: list[str] = []`; INSERT now sets `fts = to_tsvector('english', $2)` and `keywords` explicitly. Existing callers unchanged.
 
 ## Stack
 - **Frontend:** Next.js 15, TypeScript, Tailwind CSS (`frontend/`)
@@ -38,7 +38,7 @@ cd frontend && npm install && npm run dev
 - SSE format: `data: {"text": "..."}` lines, terminated by `data: [DONE]`
 - DB pool created on startup via `asyncpg.create_pool(init=register_vector)` (FastAPI `lifespan`)
 - Chunking: `tiktoken` with `cl100k_base` encoder, 512-token window, 64-token overlap (`chunk_text`)
-- `save_chunks(db, collection, content, metadata)` — chunks text, embeds, bulk-inserts into `documents`
+- `save_chunks(db, collection, content, metadata, keywords=[])` — chunks text, embeds, bulk-inserts into `documents`; sets `fts` via `to_tsvector('english', content)` at insert time
 
 **Frontend**
 - Layout: sidebar (256px) + chat column (flex-1)
@@ -71,6 +71,7 @@ backend/
     versions/
       0001_create_conversations_messages.py
       0002_add_documents.py              — documents table + ivfflat/GIN/btree indexes
+      0003_update_documents.py           — drop generated fts expression; add keywords TEXT[] column
   routers/
     conversations.py    — GET/POST/DELETE /conversations; GET /conversations/{id}/messages
     chat.py             — POST /chat
@@ -80,7 +81,7 @@ backend/
 Key symbols:
 - `llm.py`: `llm`, `embeddings_model`
 - `graph.py`: `graph` (compiled LangGraph); `ChatState` (messages, db); tools: `search_database` (InjectedState db), `search_web` (Tavily)
-- `db.py`: `chunk_text(text)`, `save_chunks(db, collection, content, metadata)`, `encode_cursor(*parts)`, `decode_cursor(cursor)`
+- `db.py`: `chunk_text(text)`, `save_chunks(db, collection, content, metadata, keywords=[])`, `encode_cursor(*parts)`, `decode_cursor(cursor)`
 - `rag.py`: `search_database_impl(query, limit, db)` — embed query → hybrid search (assistant only) → LLM rerank → batch-fetch full messages; returns `list[str]` (threshold: score ≥ 8)
 - `models.py`: `Message`, `ChatRequest`, `ConversationCreate`, `SearchRequest`, `RagSearchRequest`, `RankedChunk`, `RagSearchResponse`
 - `sql.py`: `HYBRID_SEARCH_SQL`, `HYBRID_SEARCH_ASSISTANT_SQL` — RRF fusion; assistant variant filters `metadata->>'role' = 'assistant'`

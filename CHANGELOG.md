@@ -1,5 +1,9 @@
 # Project History
 
+## 2026-06-02 (session 10)
+
+Updated `documents` table schema and insert logic. Migration `0003_update_documents`: removed `GENERATED ALWAYS AS ... STORED` from the `fts` column via `ALTER TABLE documents ALTER COLUMN fts DROP EXPRESSION` (PG12+ — preserves existing values and GIN index, no backfill); added `keywords TEXT[] NOT NULL DEFAULT '{}'` column (for caller-supplied tags, not searched). `db.py`: `save_chunks` gains an optional `keywords: list[str] = []` parameter; INSERT now explicitly sets `fts = to_tsvector('english', $2)` and `keywords = $5::text[]`. Existing callers (`routers/chat.py`, `backfill_embeddings.py`) unchanged.
+
 ## 2026-06-02 (session 9)
 
 Replaced the LangGraph intent-router pattern with a ReAct tool-calling loop. `graph.py` fully rewritten: `ChatState` simplified to `messages` + `db` (dropped `rag_messages` and `should_retrieve`); `route_intent`, `retrieve_rag`, `_call_model`, and `_route_edge` removed. Two `@tool` functions added: `search_database` wraps `search_database_impl` with `db` hidden from the LLM schema via `InjectedState("db")`; `search_web` calls Tavily (`TavilyClient`, max 5 results). LLM bound via `llm.bind_tools([search_database, search_web])`. Graph topology changed to `START → agent → tools_condition → tools → agent` (ReAct loop) or `→ END`. RAG context no longer injected into the system prompt — tool results are appended as `ToolMessage` turns and the LLM reads them naturally on the next iteration. `rag.py`: `rag_retrieve` renamed to `search_database_impl`. `models.py`: `RAGRouterDecision` removed. `requirements.txt`: added `tavily-python>=0.5.0`. `routers/chat.py`: removed `rag_messages`/`should_retrieve` from initial graph state. `routers/search.py`: updated import to alias `search_database_impl as rag_retrieve`.

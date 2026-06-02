@@ -22,14 +22,14 @@ def chunk_text(text: str) -> list[str]:
     return chunks
 
 
-async def save_chunks(db, collection: str, content: str, metadata: dict) -> None:
+async def save_chunks(db, collection: str, content: str, metadata: dict, keywords: list[str] = []) -> None:
     chunks = chunk_text(content)
     embeddings = await embeddings_model.aembed_documents(chunks)
     await db.executemany(
-        "INSERT INTO documents (collection, content, metadata, embedding) "
-        "VALUES ($1, $2, $3::jsonb, $4::vector)",
+        "INSERT INTO documents (collection, content, metadata, embedding, fts, keywords) "
+        "VALUES ($1, $2, $3::jsonb, $4::vector, to_tsvector('english', $2), $5::text[])",
         [
-            (collection, chunk, json.dumps({**metadata, "chunk_index": i}), emb)
+            (collection, chunk, json.dumps({**metadata, "chunk_index": i}), emb, keywords)
             for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
         ],
     )
