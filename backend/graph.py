@@ -1,12 +1,14 @@
 import os
 from typing import Annotated, Any
 
+from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langgraph.graph import START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import InjectedState, ToolNode, tools_condition
 from llm import llm
-from rag import search_database_impl
+from pydantic import BaseModel as PydanticBaseModel
+from rag import search_database_impl, search_memories_impl
 from tavily import TavilyClient
 from typing_extensions import TypedDict
 
@@ -41,7 +43,54 @@ def search_web(query: str) -> str:
     return "\n\n".join(f"Source: {r['url']}\n{r['content']}" for r in results)
 
 
-_tools = [search_database, search_web]
+class _Keywords(PydanticBaseModel):
+    keywords: list[str]
+
+
+_keywords_llm = llm.with_structured_output(_Keywords)
+
+
+async def _extract_keywords(content: str) -> list[str]:
+    result = await _keywords_llm.ainvoke(
+        [
+            HumanMessage(
+                content="Extract 5-10 keywords from the text below.\n\n" + content
+            )
+        ]
+    )
+    return result.keywords
+
+
+@tool
+async def save_memory(
+    type: Annotated[
+        str,
+        "Memory type: 'hot' for timeless identity facts that are always relevant (user's name, language, persistent preferences); 'cold' for events, activities, purchases, logs, or anything time-specific or situational",
+    ],
+    content: str,
+    db: Annotated[Any, InjectedState("db")],
+) -> str:
+    """Save a memory. Use 'hot' ONLY for persistent identity facts (name, preferences). Use 'cold' for everything else: events, meals, expenses, activities, or any time-bound information."""
+    from db import save_memory as db_save_memory
+    from db import save_memory_embedding
+
+    keywords = await _extract_keywords(content)
+    memory_id = await db_save_memory(db, type, content)
+    await save_memory_embedding(db, memory_id, type, content, keywords)
+    return f"Saved {type} memory."
+
+
+@tool
+async def retrieve_memories(
+    query: str,
+    db: Annotated[Any, InjectedState("db")],
+) -> str:
+    """Search stored memories (hot and cold) for information relevant to the query."""
+    results = await search_memories_impl(query, 5, db)
+    return "\n\n".join(results) if results else "No relevant memories found."
+
+
+_tools = [search_database, search_web, save_memory, retrieve_memories]
 _llm_with_tools = llm.bind_tools(_tools)
 _tool_node = ToolNode(_tools)
 

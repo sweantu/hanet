@@ -2,7 +2,7 @@ import json
 import re
 
 from llm import embeddings_model, llm
-from sql import HYBRID_SEARCH_ASSISTANT_SQL
+from sql import HYBRID_SEARCH_ASSISTANT_SQL, HYBRID_SEARCH_MEMORIES_SQL
 
 
 async def search_database_impl(query: str, limit: int, db) -> list[str]:
@@ -60,3 +60,9 @@ async def search_database_impl(query: str, limit: int, db) -> list[str]:
     content_by_id = {r["id"]: r["content"] for r in fetched}
 
     return [content_by_id.get(msg_id, fallbacks[msg_id]) for msg_id in msg_ids]
+
+
+async def search_memories_impl(query: str, limit: int, db) -> list[str]:
+    query_embedding = await embeddings_model.aembed_query(query)
+    rows = await db.fetch(HYBRID_SEARCH_MEMORIES_SQL, query_embedding, query, limit)
+    return [r["content"] for r in rows]

@@ -1,5 +1,13 @@
 # Project History
 
+## 2026-06-03 (session 11)
+
+Added a persistent memory system. New `memories` table (migration `0004_add_memories`): `id UUID`, `type TEXT` (`'hot'`|`'cold'`), `content TEXT`, `created_at TIMESTAMPTZ`. Migration `0005_update_memories_remove_keywords`: truncated stale data, dropped `keywords` column from `memories` (keywords live exclusively in `documents`). Both hot and cold memories are indexed in `documents` with `collection='memory'`: single-row insert per memory, embedding from `aembed_query`, FTS built from extracted keywords (`to_tsvector('english', keywords_joined)`), `metadata` carries `memory_id` + `type`.
+
+`db.py`: added `save_memory(db, type, content) → str`, `get_hot_memories(db) → list[str]`, `save_memory_embedding(db, memory_id, type, content, keywords)` (replaces old `save_cold_memory_embedding`; applies to both types). `rag.py`: added `search_memories_impl(query, limit, db)` — hybrid search scoped to `collection='memory'`, returns content strings directly (no rerank). `sql.py`: added `HYBRID_SEARCH_MEMORIES_SQL` — same RRF pattern as existing queries, filtered to `collection='memory'`, no join to `conversations`.
+
+`graph.py`: two new LangGraph tools — `save_memory` (extracts keywords via `_extract_keywords`, saves to `memories` + `documents` for both hot and cold) and `retrieve_memories` (hybrid search across all memory types). `_extract_keywords` uses `llm.with_structured_output(_Keywords)` where `_Keywords` is a Pydantic model (`keywords: list[str]`). `_keywords_llm` bound at module level. Tool descriptions tuned: hot = timeless identity facts (name, persistent preferences); cold = events, activities, purchases, anything time-specific. `routers/chat.py`: fetches all hot memories via `get_hot_memories` before building the message list; appends them to the system prompt as "Things to always remember". Tool calls logged to stdout via `on_tool_start` / `on_tool_end` events in the `astream_events` loop. `models.py`: added `Memory` Pydantic model.
+
 ## 2026-06-02 (session 10)
 
 Updated `documents` table schema and insert logic. Migration `0003_update_documents`: removed `GENERATED ALWAYS AS ... STORED` from the `fts` column via `ALTER TABLE documents ALTER COLUMN fts DROP EXPRESSION` (PG12+ — preserves existing values and GIN index, no backfill); added `keywords TEXT[] NOT NULL DEFAULT '{}'` column (for caller-supplied tags, not searched). `db.py`: `save_chunks` gains an optional `keywords: list[str] = []` parameter; INSERT now explicitly sets `fts = to_tsvector('english', $2)` and `keywords = $5::text[]`. Existing callers (`routers/chat.py`, `backfill_embeddings.py`) unchanged.

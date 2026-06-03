@@ -35,6 +35,36 @@ async def save_chunks(db, collection: str, content: str, metadata: dict, keyword
     )
 
 
+async def save_memory(db, type: str, content: str) -> str:
+    return await db.fetchval(
+        "INSERT INTO memories (type, content) VALUES ($1, $2) RETURNING id::text",
+        type,
+        content,
+    )
+
+
+async def get_hot_memories(db) -> list[str]:
+    rows = await db.fetch(
+        "SELECT content FROM memories WHERE type = 'hot' ORDER BY created_at"
+    )
+    return [r["content"] for r in rows]
+
+
+async def save_memory_embedding(db, memory_id: str, type: str, content: str, keywords: list[str]) -> None:
+    embedding = await embeddings_model.aembed_query(content)
+    fts_input = " ".join(keywords) if keywords else content
+    await db.execute(
+        "INSERT INTO documents (collection, content, metadata, embedding, fts, keywords) "
+        "VALUES ($1, $2, $3::jsonb, $4::vector, to_tsvector('english', $5), $6::text[])",
+        "memory",
+        content,
+        json.dumps({"memory_id": memory_id, "type": type}),
+        embedding,
+        fts_input,
+        keywords,
+    )
+
+
 def encode_cursor(*parts: str) -> str:
     return base64.urlsafe_b64encode("|".join(parts).encode()).decode()
 

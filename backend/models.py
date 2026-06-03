@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import TypedDict
 
 from pydantic import BaseModel
@@ -41,4 +42,11 @@ class RankedChunk(BaseModel):
 class RagSearchResponse(BaseModel):
     hypothetical_answer: str
     chunks: list[RankedChunk]
+
+
+class Memory(BaseModel):
+    type: str  # 'hot' | 'cold'
+    content: str
+    keywords: list[str] = []
+    created_at: datetime
 

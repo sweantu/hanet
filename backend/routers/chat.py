@@ -1,6 +1,6 @@
 import json
 
-from db import save_chunks
+from db import get_hot_memories, save_chunks
 from dependencies import get_db
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -40,7 +40,12 @@ async def chat(body: ChatRequest, db=Depends(get_db)):
     )
     ctx_rows = list(reversed(ctx_rows))
 
-    lc_messages = [SystemMessage(content="You are a helpful assistant.")]
+    hot_memories = await get_hot_memories(db)
+    system_content = "You are a helpful assistant."
+    if hot_memories:
+        system_content += "\n\nThings to always remember:\n" + "\n".join(f"- {m}" for m in hot_memories)
+
+    lc_messages = [SystemMessage(content=system_content)]
     lc_messages += [
         HumanMessage(content=r["content"])
         if r["role"] == "user"
@@ -54,7 +59,11 @@ async def chat(body: ChatRequest, db=Depends(get_db)):
             {"messages": lc_messages, "db": db},
             version="v2",
         ):
-            if (
+            if event["event"] == "on_tool_start":
+                print(f"[tool] {event['name']} <- {event['data'].get('input')}")
+            elif event["event"] == "on_tool_end":
+                print(f"[tool] {event['name']} -> {event['data'].get('output')}")
+            elif (
                 event["event"] == "on_chat_model_stream"
                 and event.get("metadata", {}).get("langgraph_node") == "agent"
             ):
