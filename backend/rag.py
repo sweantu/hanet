@@ -1,8 +1,43 @@
 import json
-import re
 
 from llm import embeddings_model, llm
+from pydantic import BaseModel as PydanticBaseModel
 from sql import HYBRID_SEARCH_ASSISTANT_SQL, HYBRID_SEARCH_MEMORIES_SQL
+
+
+class _Scores(PydanticBaseModel):
+    scores: list[float]
+
+
+_scoring_llm = llm.with_structured_output(_Scores)
+
+
+async def _llm_score(query: str, rows: list) -> list[float]:
+    if not rows:
+        return []
+    chunks_text = "\n\n".join(f"[{i + 1}] {r['content']}" for i, r in enumerate(rows))
+    try:
+        content = (
+            f"Query: {query}\n\n"
+            f"Rate each passage 0–10 for relevance to the query. "
+            f"Return one score per passage in the same order.\n\n"
+            f"{chunks_text}"
+        )
+        print(f"[content]: {content}")
+        result = await _scoring_llm.ainvoke(
+            [
+                {
+                    "role": "user",
+                    "content": content,
+                }
+            ]
+        )
+        if len(result.scores) != len(rows):
+            raise ValueError("score count mismatch")
+        print(f"[scores]: {result.scores}")
+        return result.scores
+    except Exception:
+        return [float(r["rrf_score"]) for r in rows]
 
 
 async def search_database_impl(query: str, limit: int, db) -> list[str]:
@@ -11,30 +46,7 @@ async def search_database_impl(query: str, limit: int, db) -> list[str]:
     if not rows:
         return []
 
-    chunks_text = "\n\n".join(f"[{i + 1}] {r['content']}" for i, r in enumerate(rows))
-    rerank_response = await llm.ainvoke(
-        [
-            {
-                "role": "user",
-                "content": (
-                    f"Query: {query}\n\n"
-                    f"Rate each passage 0–10 for relevance to the query. "
-                    f"Reply ONLY with a JSON array of numbers, one per passage, in the same order.\n\n"
-                    f"{chunks_text}"
-                ),
-            }
-        ]
-    )
-    try:
-        match = re.search(r"\[[\d\s.,]+\]", rerank_response.content)
-        if not match:
-            raise ValueError("no JSON array")
-        scores = [float(s) for s in json.loads(match.group())]
-        if len(scores) != len(rows):
-            raise ValueError("score count mismatch")
-    except (json.JSONDecodeError, ValueError):
-        scores = [float(r["rrf_score"]) for r in rows]
-
+    scores = await _llm_score(query, rows)
     ranked = sorted(zip(rows, scores), key=lambda x: x[1], reverse=True)
 
     qualifying: list[tuple] = []
@@ -65,4 +77,26 @@ async def search_database_impl(query: str, limit: int, db) -> list[str]:
 async def search_memories_impl(query: str, limit: int, db) -> list[str]:
     query_embedding = await embeddings_model.aembed_query(query)
     rows = await db.fetch(HYBRID_SEARCH_MEMORIES_SQL, query_embedding, query, limit)
-    return [r["content"] for r in rows]
+    if not rows:
+        return []
+    scores = await _llm_score(query, rows)
+    return [r["content"] for r, s in zip(rows, scores) if s >= 8]
+
+
+async def search_memories_with_ids_impl(query: str, limit: int, db) -> list[dict]:
+    query_embedding = await embeddings_model.aembed_query(query)
+    rows = await db.fetch(HYBRID_SEARCH_MEMORIES_SQL, query_embedding, query, limit)
+    if not rows:
+        return []
+    scores = await _llm_score(query, rows)
+    result = []
+    for r, s in zip(rows, scores):
+        if s < 5:
+            continue
+        meta = (
+            r["metadata"]
+            if isinstance(r["metadata"], dict)
+            else json.loads(r["metadata"])
+        )
+        result.append({"memory_id": meta["memory_id"], "content": r["content"]})
+    return result

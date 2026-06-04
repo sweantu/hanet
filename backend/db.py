@@ -1,5 +1,6 @@
 import base64
 import json
+import uuid
 
 import tiktoken
 
@@ -59,6 +60,38 @@ async def save_memory_embedding(db, memory_id: str, type: str, content: str, key
         "memory",
         content,
         json.dumps({"memory_id": memory_id, "type": type}),
+        embedding,
+        fts_input,
+        keywords,
+    )
+
+
+async def delete_memories(db, memory_ids: list[str]) -> int:
+    await db.execute(
+        "DELETE FROM documents WHERE collection = 'memory' AND metadata->>'memory_id' = ANY($1::text[])",
+        memory_ids,
+    )
+    result = await db.execute(
+        "DELETE FROM memories WHERE id = ANY($1::uuid[])",
+        [uuid.UUID(mid) for mid in memory_ids],
+    )
+    return int(result.split()[-1])
+
+
+async def update_memory(db, memory_id: str, new_content: str, keywords: list[str]) -> None:
+    embedding = await embeddings_model.aembed_query(new_content)
+    fts_input = " ".join(keywords) if keywords else new_content
+    await db.execute(
+        "UPDATE memories SET content=$2 WHERE id=$1::uuid",
+        memory_id,
+        new_content,
+    )
+    await db.execute(
+        "UPDATE documents SET content=$2, embedding=$3::vector, "
+        "fts=to_tsvector('english', $4), keywords=$5::text[] "
+        "WHERE collection='memory' AND metadata->>'memory_id'=$1",
+        memory_id,
+        new_content,
         embedding,
         fts_input,
         keywords,

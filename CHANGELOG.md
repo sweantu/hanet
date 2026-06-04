@@ -1,5 +1,15 @@
 # Project History
 
+## 2026-06-04 (session 12)
+
+Added memory CRUD tools and refactored memory search scoring.
+
+`rag.py`: extracted shared `_llm_score(query, rows) → list[float]` helper — uses `llm.with_structured_output(_Scores)` (Pydantic `_Scores(scores: list[float])`) instead of the previous fragile regex-over-raw-string approach; falls back to RRF scores on any error. Applied to `search_database_impl` (replaces inline regex rerank block; `import re` removed), `search_memories_impl` (now filters by score ≥ 8), and new `search_memories_with_ids_impl` (filters by score ≥ 5, returns `list[{memory_id, content}]` for use by delete/update tools).
+
+`db.py`: added `delete_memories(db, memory_ids: list[str]) → int` — deletes from `documents` by `metadata->>'memory_id' = ANY(...)` then from `memories` by UUID, returns row count. Added `update_memory(db, memory_id, new_content, keywords)` — re-embeds new content, updates both `memories.content` and `documents` (content, embedding, fts, keywords) in place.
+
+`graph.py`: added `delete_memory` tool — searches top-3 candidates via `search_memories_with_ids_impl`, deletes only the single best match (`matches[:1]`); prevents collateral deletion of unrelated memories sharing a name/term. Added `update_memory` tool — finds single best match, re-extracts keywords via `_extract_keywords`, updates in place; preferred over delete+save for "change my name/preference" patterns. Fixed a bug where the old `delete_memory` deleted all matches above threshold (score ≥ 5), which caused unrelated memories (e.g., "Anh Tu is a backend engineer") to be wiped when deleting a name memory. All six tools registered in `_tools`.
+
 ## 2026-06-03 (session 11)
 
 Added a persistent memory system. New `memories` table (migration `0004_add_memories`): `id UUID`, `type TEXT` (`'hot'`|`'cold'`), `content TEXT`, `created_at TIMESTAMPTZ`. Migration `0005_update_memories_remove_keywords`: truncated stale data, dropped `keywords` column from `memories` (keywords live exclusively in `documents`). Both hot and cold memories are indexed in `documents` with `collection='memory'`: single-row insert per memory, embedding from `aembed_query`, FTS built from extracted keywords (`to_tsvector('english', keywords_joined)`), `metadata` carries `memory_id` + `type`.

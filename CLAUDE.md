@@ -3,8 +3,8 @@
 ## Current state
 Streaming chat with persistent conversation history, hybrid search, search-to-message navigation, and agent memory. PostgreSQL stores conversations, messages, document chunks, and memories. Sidebar lists past conversations. UI is dark mode (gray-900 background, Tailwind CSS). Both backend and frontend are separated by feature into focused modules.
 
-## Last session recap — 2026-06-03
-Added persistent memory system. `memories` table: `id`, `type` (hot/cold), `content`, `created_at`. Both types are also indexed in `documents` (`collection='memory'`) with embeddings and keyword-based FTS. `db.py`: `save_memory`, `get_hot_memories`, `save_memory_embedding`. `rag.py`: `search_memories_impl`. `sql.py`: `HYBRID_SEARCH_MEMORIES_SQL`. `graph.py`: `save_memory` tool (LLM-routed, always saves to documents; hot = identity facts, cold = events/activities), `retrieve_memories` tool (searches both types), `_extract_keywords` via `llm.with_structured_output(_Keywords)`. System prompt always injects hot memories. Tool calls logged to stdout.
+## Last session recap — 2026-06-04
+Added memory CRUD tools and LLM-based scoring for memory search. `graph.py`: new `delete_memory` tool (finds single best match via `search_memories_with_ids_impl`, deletes from both `memories` and `documents`); new `update_memory` tool (finds single best match, re-embeds new content, updates both tables — preferred over delete+save for name/preference changes). `db.py`: new `delete_memories(db, memory_ids)`, `update_memory(db, memory_id, new_content, keywords)`. `rag.py`: extracted shared `_llm_score(query, rows)` helper using `llm.with_structured_output(_Scores)` (structured output, no regex); applied to `search_database_impl` (replaces old regex rerank), `search_memories_impl` (score ≥ 8 filter), `search_memories_with_ids_impl` (score ≥ 5, returns `{memory_id, content}` dicts for delete/update).
 
 ## Stack
 - **Frontend:** Next.js 15, TypeScript, Tailwind CSS (`frontend/`)
@@ -82,9 +82,9 @@ backend/
 
 Key symbols:
 - `llm.py`: `llm`, `embeddings_model`
-- `graph.py`: `graph` (compiled LangGraph); `ChatState` (messages, db); tools: `search_database`, `search_web` (Tavily), `save_memory` (hot/cold, always saves to documents), `retrieve_memories` (hybrid search across both types); `_extract_keywords` via `llm.with_structured_output(_Keywords)`
-- `db.py`: `chunk_text(text)`, `save_chunks(db, collection, content, metadata, keywords=[])`, `save_memory(db, type, content) → str`, `get_hot_memories(db) → list[str]`, `save_memory_embedding(db, memory_id, type, content, keywords)`, `encode_cursor(*parts)`, `decode_cursor(cursor)`
-- `rag.py`: `search_database_impl(query, limit, db)` — embed → hybrid search (assistant only) → LLM rerank → batch-fetch; returns `list[str]` (score ≥ 8). `search_memories_impl(query, limit, db)` — hybrid search `collection='memory'`, returns content strings
+- `graph.py`: `graph` (compiled LangGraph); `ChatState` (messages, db); tools: `search_database`, `search_web` (Tavily), `save_memory` (hot/cold, always saves to documents), `retrieve_memories`, `delete_memory` (deletes single best match), `update_memory` (updates single best match in-place, re-embeds); `_extract_keywords` via `llm.with_structured_output(_Keywords)`
+- `db.py`: `chunk_text(text)`, `save_chunks(db, collection, content, metadata, keywords=[])`, `save_memory(db, type, content) → str`, `get_hot_memories(db) → list[str]`, `save_memory_embedding(db, memory_id, type, content, keywords)`, `delete_memories(db, memory_ids) → int`, `update_memory(db, memory_id, new_content, keywords)`, `encode_cursor(*parts)`, `decode_cursor(cursor)`
+- `rag.py`: `_llm_score(query, rows) → list[float]` — structured-output LLM scoring, falls back to RRF on error. `search_database_impl(query, limit, db)` — embed → hybrid search → `_llm_score` → filter ≥ 8 → batch-fetch; returns `list[str]`. `search_memories_impl(query, limit, db)` — hybrid search + `_llm_score`, filter ≥ 8, returns content strings. `search_memories_with_ids_impl(query, limit, db)` — hybrid search + `_llm_score`, filter ≥ 5, returns `list[{memory_id, content}]`
 - `models.py`: `Message`, `ChatRequest`, `ConversationCreate`, `SearchRequest`, `RagSearchRequest`, `RankedChunk`, `RagSearchResponse`, `Memory`
 - `sql.py`: `HYBRID_SEARCH_SQL`, `HYBRID_SEARCH_ASSISTANT_SQL`, `HYBRID_SEARCH_MEMORIES_SQL` — RRF fusion; memories variant scoped to `collection='memory'`, no conversations join
 - Endpoints: same as before — `GET /conversations`, `POST /conversations`, `DELETE /conversations/{id}`, `GET /conversations/{id}/messages`, `POST /chat`, `POST /search`, `POST /search/semantic`, `POST /search/keyword`, `POST /search/rag`, `POST /search/rag/messages`
