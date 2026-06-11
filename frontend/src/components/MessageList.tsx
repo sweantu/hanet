@@ -4,18 +4,22 @@ interface MessageListProps {
   messages: Message[];
   msgHasOlder: boolean;
   isStreaming: boolean;
+  pendingInterrupt: boolean;
   messagesContainerRef: React.RefObject<HTMLDivElement | null>;
   bottomRef: React.RefObject<HTMLDivElement | null>;
   onLoadOlderMessages: () => void;
+  onResolveInterrupt: (approved: boolean) => void;
 }
 
 export default function MessageList({
   messages,
   msgHasOlder,
   isStreaming,
+  pendingInterrupt,
   messagesContainerRef,
   bottomRef,
   onLoadOlderMessages,
+  onResolveInterrupt,
 }: MessageListProps) {
   return (
     <div ref={messagesContainerRef} className="flex-1 overflow-y-auto px-4 py-6">
@@ -39,6 +43,55 @@ export default function MessageList({
         )}
 
         {messages.map((msg, i) => {
+          if (msg.role === "interrupt" && msg.interrupt) {
+            return (
+              <div key={msg.id ?? `interrupt-${i}`} className="flex justify-center">
+                <div className="max-w-[75%] px-4 py-4 rounded-2xl border border-amber-500/50 bg-amber-950/30 text-sm space-y-3">
+                  <div className="flex items-start gap-2">
+                    <span className="text-amber-400 text-base leading-none mt-0.5">⚠</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-amber-300">{msg.interrupt.summary}</p>
+                      {msg.interrupt.old_content && (
+                        <p className="text-gray-500 mt-1 text-xs line-through break-words">
+                          {msg.interrupt.old_content}
+                        </p>
+                      )}
+                      <p className="text-gray-200 mt-1 break-words">{msg.interrupt.content}</p>
+                      {msg.interrupt.keywords.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-2">
+                          {msg.interrupt.keywords.map((kw) => (
+                            <span
+                              key={kw}
+                              className="text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400"
+                            >
+                              {kw}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex gap-2 justify-end">
+                    <button
+                      onClick={() => onResolveInterrupt(false)}
+                      disabled={!pendingInterrupt}
+                      className="px-4 py-1.5 rounded-lg text-xs font-medium bg-gray-700 text-gray-300 hover:bg-gray-600 disabled:opacity-40 transition-colors"
+                    >
+                      Deny
+                    </button>
+                    <button
+                      onClick={() => onResolveInterrupt(true)}
+                      disabled={!pendingInterrupt}
+                      className="px-4 py-1.5 rounded-lg text-xs font-medium bg-amber-600 text-white hover:bg-amber-500 disabled:opacity-40 transition-colors"
+                    >
+                      Approve
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          }
+
           const isLastAssistant =
             isStreaming && i === messages.length - 1 && msg.role === "assistant";
           return (

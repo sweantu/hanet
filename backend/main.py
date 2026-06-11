@@ -4,8 +4,10 @@ from contextlib import asynccontextmanager
 import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from pgvector.asyncpg import register_vector
 
+from graph import build_graph
 from routers import chat, conversations, search
 
 
@@ -15,7 +17,13 @@ async def lifespan(app: FastAPI):
         os.environ["DATABASE_URL"].replace("+asyncpg", ""),
         init=register_vector,
     )
-    yield
+
+    pg_conn_string = os.environ["DATABASE_URL"].replace("+asyncpg", "")
+    async with AsyncPostgresSaver.from_conn_string(pg_conn_string) as checkpointer:
+        await checkpointer.setup()
+        app.state.graph = build_graph(checkpointer)
+        yield
+
     await app.state.db.close()
 
 

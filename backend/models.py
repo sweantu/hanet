@@ -50,3 +50,8 @@ class Memory(BaseModel):
     keywords: list[str] = []
     created_at: datetime
 
+
+class ResumeRequest(BaseModel):
+    conversation_id: str
+    approved: bool
+

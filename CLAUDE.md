@@ -3,8 +3,18 @@
 ## Current state
 Streaming chat with persistent conversation history, hybrid search, search-to-message navigation, and agent memory. PostgreSQL stores conversations, messages, document chunks, and memories. Sidebar lists past conversations. UI is dark mode (gray-900 background, Tailwind CSS). Both backend and frontend are separated by feature into focused modules.
 
-## Last session recap — 2026-06-04
-Added memory CRUD tools and LLM-based scoring for memory search. `graph.py`: new `delete_memory` tool (finds single best match via `search_memories_with_ids_impl`, deletes from both `memories` and `documents`); new `update_memory` tool (finds single best match, re-embeds new content, updates both tables — preferred over delete+save for name/preference changes). `db.py`: new `delete_memories(db, memory_ids)`, `update_memory(db, memory_id, new_content, keywords)`. `rag.py`: extracted shared `_llm_score(query, rows)` helper using `llm.with_structured_output(_Scores)` (structured output, no regex); applied to `search_database_impl` (replaces old regex rerank), `search_memories_impl` (score ≥ 8 filter), `search_memories_with_ids_impl` (score ≥ 5, returns `{memory_id, content}` dicts for delete/update).
+## Last session recap — 2026-06-09
+Added Human-in-the-Loop (HITL) approval flow for all memory write tools. Before any memory write executes, the chat UI pauses and shows an amber approval card (content + keywords) with Approve/Deny buttons.
+
+Key changes:
+- `graph.py`: removed `db` from `ChatState` (can't checkpoint live connections); switched all tools from `InjectedState("db")` to `RunnableConfig` (`config["configurable"]["db"]`); added `interrupt({tool, summary, content, keywords})` before each write in `save_memory`, `delete_memory` (after finding match), `update_memory` (after finding match + extracting keywords); `update_memory` payload also includes `old_content`; replaced module-level `graph = _builder.compile()` with `build_graph(checkpointer=None)` factory.
+- `main.py`: added `AsyncPostgresSaver.from_conn_string(pg_conn_string)` as async context manager in lifespan; calls `await checkpointer.setup()` (creates `langgraph_checkpoints` tables); calls `build_graph(checkpointer)`.
+- `models.py`: new `ResumeRequest(conversation_id, approved)`.
+- `routers/chat.py`: added `_stream_graph(graph, input_data, config, results)` async generator helper; `POST /chat` now takes `Request`, checks `aget_state` first (409 if interrupt pending), passes `config={"configurable": {"thread_id": conv_id, "db": db}}`; new `POST /chat/resume` streams `Command(resume=approved)`; new `GET /conversations/{id}/pending-interrupt` checks checkpoint state.
+- `frontend/src/types/index.ts`: new `InterruptData` interface; `Message.role` extended with `"interrupt"`.
+- `frontend/src/hooks/useChat.ts`: added `pendingInterrupt` state; `parseStream` helper handles both `{text}` and `{interrupt}` SSE events; `resolveInterrupt(approved)` POSTs to `/chat/resume`; `setInterruptFromReload(payload)` for page-reload interrupt recovery.
+- `frontend/src/components/MessageList.tsx`: renders amber interrupt cards for `role="interrupt"` messages.
+- `frontend/src/app/page.tsx`: after `loadMessages`, checks `/conversations/{id}/pending-interrupt` and calls `setInterruptFromReload` via ref; passes `pendingInterrupt` and `resolveInterrupt` to `MessageList`; passes `isStreaming || pendingInterrupt` to `ChatInput`.
 
 ## Stack
 - **Frontend:** Next.js 15, TypeScript, Tailwind CSS (`frontend/`)
@@ -82,12 +92,12 @@ backend/
 
 Key symbols:
 - `llm.py`: `llm`, `embeddings_model`
-- `graph.py`: `graph` (compiled LangGraph); `ChatState` (messages, db); tools: `search_database`, `search_web` (Tavily), `save_memory` (hot/cold, always saves to documents), `retrieve_memories`, `delete_memory` (deletes single best match), `update_memory` (updates single best match in-place, re-embeds); `_extract_keywords` via `llm.with_structured_output(_Keywords)`
+- `graph.py`: `build_graph(checkpointer=None)` factory; `ChatState` (messages only — db removed); tools use `RunnableConfig` for db access via `config["configurable"]["db"]`; write tools call `interrupt(payload)` before DB write; tools: `search_database`, `search_web` (Tavily), `save_memory` (interrupts before save), `retrieve_memories`, `delete_memory` (searches first, then interrupts), `update_memory` (searches + extracts keywords first, then interrupts with `old_content`); `_extract_keywords` via `llm.with_structured_output(_Keywords)`
 - `db.py`: `chunk_text(text)`, `save_chunks(db, collection, content, metadata, keywords=[])`, `save_memory(db, type, content) → str`, `get_hot_memories(db) → list[str]`, `save_memory_embedding(db, memory_id, type, content, keywords)`, `delete_memories(db, memory_ids) → int`, `update_memory(db, memory_id, new_content, keywords)`, `encode_cursor(*parts)`, `decode_cursor(cursor)`
 - `rag.py`: `_llm_score(query, rows) → list[float]` — structured-output LLM scoring, falls back to RRF on error. `search_database_impl(query, limit, db)` — embed → hybrid search → `_llm_score` → filter ≥ 8 → batch-fetch; returns `list[str]`. `search_memories_impl(query, limit, db)` — hybrid search + `_llm_score`, filter ≥ 8, returns content strings. `search_memories_with_ids_impl(query, limit, db)` — hybrid search + `_llm_score`, filter ≥ 5, returns `list[{memory_id, content}]`
 - `models.py`: `Message`, `ChatRequest`, `ConversationCreate`, `SearchRequest`, `RagSearchRequest`, `RankedChunk`, `RagSearchResponse`, `Memory`
 - `sql.py`: `HYBRID_SEARCH_SQL`, `HYBRID_SEARCH_ASSISTANT_SQL`, `HYBRID_SEARCH_MEMORIES_SQL` — RRF fusion; memories variant scoped to `collection='memory'`, no conversations join
-- Endpoints: same as before — `GET /conversations`, `POST /conversations`, `DELETE /conversations/{id}`, `GET /conversations/{id}/messages`, `POST /chat`, `POST /search`, `POST /search/semantic`, `POST /search/keyword`, `POST /search/rag`, `POST /search/rag/messages`
+- Endpoints: `GET /conversations`, `POST /conversations`, `DELETE /conversations/{id}`, `GET /conversations/{id}/messages`, `GET /conversations/{id}/pending-interrupt`, `POST /chat`, `POST /chat/resume`, `POST /search`, `POST /search/semantic`, `POST /search/keyword`, `POST /search/rag`, `POST /search/rag/messages`
 
 ## Frontend structure
 
@@ -124,4 +134,5 @@ See `CHANGELOG.md` for full session-by-session history.
 ## Planned next steps
 - Rename conversations from the sidebar
 - Memory management UI (view/delete memories)
+- Switch checkpointer to `AsyncConnectionPool` for concurrent load
 

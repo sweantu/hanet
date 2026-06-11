@@ -1,5 +1,29 @@
 # Project History
 
+## 2026-06-10 (session 13)
+
+Added Human-in-the-Loop (HITL) approval flow for all memory write tools. Before any write executes, the graph pauses and the chat UI shows an amber approval card with the resolved content and keywords. User clicks Approve or Deny; the graph resumes via `Command(resume=bool)`. Interrupt state is persisted in Postgres via `AsyncPostgresSaver`, so pending approvals survive page reloads.
+
+**Architecture:** LangGraph `interrupt(payload)` → checkpoint saved to Postgres → SSE `{"interrupt": {...}}` event → frontend shows card → `POST /chat/resume` with `Command(resume=approved)` → graph continues.
+
+`requirements.txt`: added `langgraph-checkpoint-postgres>=2.0.0` and `psycopg[binary,pool]>=3.1.0`.
+
+`graph.py`: removed `db` from `ChatState` (live asyncpg connections can't be checkpointed); switched all six tools from `InjectedState("db")` to `RunnableConfig` — `db = config["configurable"]["db"]`. Added `interrupt(payload)` calls before DB writes in `save_memory` (after keyword extraction — payload includes `{tool, summary, content, keywords}`), `delete_memory` (after finding the best match — payload shows the matched content), and `update_memory` (after finding match and extracting new keywords — payload also includes `old_content`). If `approved` is falsy, returns a declined message. Replaced module-level `graph = _builder.compile()` with `build_graph(checkpointer=None)` factory function.
+
+`main.py`: lifespan uses `async with AsyncPostgresSaver.from_conn_string(pg_conn_string) as checkpointer`; calls `await checkpointer.setup()` (creates `langgraph_checkpoints` and related tables); calls `build_graph(checkpointer)` and stores result in `app.state.graph`.
+
+`models.py`: added `ResumeRequest(conversation_id: str, approved: bool)`.
+
+`routers/chat.py`: extracted `_stream_graph(graph, input_data, config, results)` async generator — streams `on_chat_model_stream` events as SSE `{"text": chunk}`, calls `aget_state` after the loop to detect interrupts, yields `{"interrupt": payload}` if paused, appends `(full_response_str, interrupt_payload)` to the `results` list before yielding `[DONE]`. `POST /chat` now takes `Request`, reads `app.state.graph`, builds `config = {"configurable": {"thread_id": conv_id, "db": db}}`, guards against pending interrupts with `aget_state` (returns 409 if `state.next` is non-empty), and only saves the assistant message + embeddings if no interrupt fired. New `POST /chat/resume` streams `Command(resume=body.approved)` through the same helper. New `GET /conversations/{id}/pending-interrupt` checks checkpoint state without executing any nodes — returns `{"interrupt": payload}` or `{"interrupt": null}`.
+
+`frontend/src/types/index.ts`: added `InterruptData {tool, summary, content, keywords, old_content?}`; extended `Message.role` to include `"interrupt"` and added `interrupt?: InterruptData` field.
+
+`frontend/src/hooks/useChat.ts`: added `pendingInterrupt` state; extracted `parseStream(reader)` callback that handles both `{text}` and `{interrupt}` SSE events (removes trailing empty assistant placeholder on interrupt); added `resolveInterrupt(approved)` — clears interrupt message, POSTs to `/chat/resume`, streams response via `parseStream`; added `setInterruptFromReload(payload)` for page-reload recovery; `sendMessage` guards on `pendingInterrupt`.
+
+`frontend/src/components/MessageList.tsx`: renders amber interrupt cards for `role="interrupt"` messages — shows summary, optional `old_content` (strikethrough), new content, keyword chips, and Approve/Deny buttons (disabled when `!pendingInterrupt`).
+
+`frontend/src/app/page.tsx`: added `setInterruptFromReloadRef` (ref pattern to call `setInterruptFromReload` from `selectConversation` which is defined before `useChat`); `selectConversation` fetches `/conversations/{id}/pending-interrupt` after `loadMessages` and calls `setInterruptFromReload` if a pending interrupt is found; passes `pendingInterrupt` and `resolveInterrupt` to `MessageList`; passes `isStreaming || pendingInterrupt` to `ChatInput`.
+
 ## 2026-06-04 (session 12)
 
 Added memory CRUD tools and refactored memory search scoring.

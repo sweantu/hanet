@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import ChatInput from "../components/ChatInput";
 import MessageList from "../components/MessageList";
 import SearchModal from "../components/SearchModal";
@@ -9,6 +9,8 @@ import { useChat } from "../hooks/useChat";
 import { useConversations } from "../hooks/useConversations";
 import { useMessages } from "../hooks/useMessages";
 import { useSearch } from "../hooks/useSearch";
+import { API_URL } from "../lib/api";
+import type { InterruptData } from "../types";
 
 export default function ChatPage() {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -36,9 +38,21 @@ export default function ChatPage() {
     targetMessageIdRef,
   } = useMessages();
 
+  // ref so selectConversation (defined before useChat) can call setInterruptFromReload
+  const setInterruptFromReloadRef = useRef<((payload: InterruptData) => void) | null>(null);
+
   const selectConversation = useCallback(
     async (id: string, loadAll = false) => {
       await loadMessages(id, loadAll);
+      try {
+        const r = await fetch(`${API_URL}/conversations/${id}/pending-interrupt`);
+        if (r.ok) {
+          const data = await r.json();
+          if (data.interrupt) {
+            setInterruptFromReloadRef.current?.(data.interrupt);
+          }
+        }
+      } catch {}
     },
     [loadMessages]
   );
@@ -60,7 +74,16 @@ export default function ChatPage() {
     [activeId, setActiveId, setMessages, deleteConversation]
   );
 
-  const { input, setInput, isStreaming, sendMessage, textareaRef } = useChat({
+  const {
+    input,
+    setInput,
+    isStreaming,
+    pendingInterrupt,
+    sendMessage,
+    resolveInterrupt,
+    setInterruptFromReload,
+    textareaRef,
+  } = useChat({
     activeId,
     messages,
     setMessages,
@@ -68,6 +91,9 @@ export default function ChatPage() {
     onSetActiveId: setActiveId,
     onAfterSend: fetchConversations,
   });
+
+  // wire the ref so selectConversation can call setInterruptFromReload
+  setInterruptFromReloadRef.current = setInterruptFromReload;
 
   const {
     searchOpen,
@@ -124,14 +150,16 @@ export default function ChatPage() {
           messages={messages}
           msgHasOlder={msgHasOlder}
           isStreaming={isStreaming}
+          pendingInterrupt={pendingInterrupt}
           messagesContainerRef={messagesContainerRef}
           bottomRef={bottomRef}
           onLoadOlderMessages={loadOlderMessages}
+          onResolveInterrupt={resolveInterrupt}
         />
 
         <ChatInput
           input={input}
-          isStreaming={isStreaming}
+          isStreaming={isStreaming || pendingInterrupt}
           textareaRef={textareaRef}
           onInputChange={setInput}
           onSend={sendMessage}

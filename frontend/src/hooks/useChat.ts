@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { API_URL } from "../lib/api";
-import type { Conversation, Message } from "../types";
+import type { Conversation, InterruptData, Message } from "../types";
 
 interface UseChatOptions {
   activeId: string | null;
@@ -23,6 +23,7 @@ export function useChat({
 }: UseChatOptions) {
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [pendingInterrupt, setPendingInterrupt] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -32,9 +33,59 @@ export function useChat({
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, [input]);
 
+  const parseStream = useCallback(
+    async (reader: ReadableStreamDefaultReader<Uint8Array>): Promise<boolean> => {
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let foundInterrupt = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6).trim();
+          if (data === "[DONE]") break;
+          try {
+            const parsed = JSON.parse(data) as { text?: string; interrupt?: InterruptData };
+            if (parsed.text) {
+              setMessages((prev) => {
+                const updated = [...prev];
+                const last = updated[updated.length - 1];
+                updated[updated.length - 1] = { ...last, content: last.content + parsed.text! };
+                return updated;
+              });
+            } else if (parsed.interrupt) {
+              setMessages((prev) => {
+                // Remove trailing empty assistant placeholder if present
+                const filtered = prev.filter(
+                  (m, i) =>
+                    !(i === prev.length - 1 && m.role === "assistant" && m.content === "")
+                );
+                return [
+                  ...filtered,
+                  { role: "interrupt", content: "", interrupt: parsed.interrupt },
+                ];
+              });
+              setPendingInterrupt(true);
+              foundInterrupt = true;
+            }
+          } catch {
+            // ignore malformed events
+          }
+        }
+      }
+      return foundInterrupt;
+    },
+    [setMessages]
+  );
+
   const sendMessage = useCallback(async () => {
     const text = input.trim();
-    if (!text || isStreaming) return;
+    if (!text || isStreaming || pendingInterrupt) return;
 
     let currentId = activeId;
     if (!currentId) {
@@ -58,33 +109,8 @@ export function useChat({
 
       if (!res.ok || !res.body) throw new Error("Request failed");
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const data = line.slice(6).trim();
-          if (data === "[DONE]") break;
-          try {
-            const { text: chunk } = JSON.parse(data) as { text: string };
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              updated[updated.length - 1] = { ...last, content: last.content + chunk };
-              return updated;
-            });
-          } catch {
-            // ignore malformed events
-          }
-        }
-      }
+      const foundInterrupt = await parseStream(res.body.getReader());
+      if (!foundInterrupt) onAfterSend();
     } catch {
       setMessages((prev) => {
         const updated = [...prev];
@@ -96,9 +122,77 @@ export function useChat({
       });
     } finally {
       setIsStreaming(false);
-      onAfterSend();
     }
-  }, [input, isStreaming, activeId, onCreateConversation, onSetActiveId, setMessages, onAfterSend]);
+  }, [
+    input,
+    isStreaming,
+    pendingInterrupt,
+    activeId,
+    onCreateConversation,
+    onSetActiveId,
+    setMessages,
+    onAfterSend,
+    parseStream,
+  ]);
 
-  return { input, setInput, isStreaming, sendMessage, textareaRef };
+  const resolveInterrupt = useCallback(
+    async (approved: boolean) => {
+      if (!activeId) return;
+
+      setMessages((prev) => prev.filter((m) => m.role !== "interrupt"));
+      setPendingInterrupt(false);
+      setIsStreaming(true);
+      setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+
+      try {
+        const res = await fetch(`${API_URL}/chat/resume`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conversation_id: activeId, approved }),
+        });
+
+        if (!res.ok || !res.body) throw new Error("Resume failed");
+
+        const foundInterrupt = await parseStream(res.body.getReader());
+        if (!foundInterrupt) onAfterSend();
+      } catch {
+        setMessages((prev) => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (last?.role === "assistant" && last.content === "") {
+            updated[updated.length - 1] = {
+              role: "assistant",
+              content: "Something went wrong. Please try again.",
+            };
+          }
+          return updated;
+        });
+      } finally {
+        setIsStreaming(false);
+      }
+    },
+    [activeId, setMessages, onAfterSend, parseStream]
+  );
+
+  const setInterruptFromReload = useCallback(
+    (payload: InterruptData) => {
+      setMessages((prev) => [
+        ...prev,
+        { role: "interrupt", content: "", interrupt: payload },
+      ]);
+      setPendingInterrupt(true);
+    },
+    [setMessages]
+  );
+
+  return {
+    input,
+    setInput,
+    isStreaming,
+    pendingInterrupt,
+    sendMessage,
+    resolveInterrupt,
+    setInterruptFromReload,
+    textareaRef,
+  };
 }

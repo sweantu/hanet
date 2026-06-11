@@ -1,7 +1,16 @@
+export interface InterruptData {
+  tool: string;
+  summary: string;
+  content: string;
+  keywords: string[];
+  old_content?: string;
+}
+
 export interface Message {
   id?: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "interrupt";
   content: string;
+  interrupt?: InterruptData;
 }
 
 export interface Conversation {
