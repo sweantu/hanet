@@ -49,27 +49,9 @@ export default function MessageList({
                 <div className="max-w-[75%] px-4 py-4 rounded-2xl border border-amber-500/50 bg-amber-950/30 text-sm space-y-3">
                   <div className="flex items-start gap-2">
                     <span className="text-amber-400 text-base leading-none mt-0.5">⚠</span>
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-amber-300">{msg.interrupt.summary}</p>
-                      {msg.interrupt.old_content && (
-                        <p className="text-gray-500 mt-1 text-xs line-through break-words">
-                          {msg.interrupt.old_content}
-                        </p>
-                      )}
-                      <p className="text-gray-200 mt-1 break-words">{msg.interrupt.content}</p>
-                      {msg.interrupt.keywords.length > 0 && (
-                        <div className="flex flex-wrap gap-1 mt-2">
-                          {msg.interrupt.keywords.map((kw) => (
-                            <span
-                              key={kw}
-                              className="text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400"
-                            >
-                              {kw}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
+                    <p className="flex-1 text-gray-200 whitespace-pre-wrap break-words">
+                      {msg.interrupt.summary}
+                    </p>
                   </div>
                   <div className="flex gap-2 justify-end">
                     <button

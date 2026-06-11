@@ -1,5 +1,17 @@
 # Project History
 
+## 2026-06-11 (session 14)
+
+Refactored HITL into a dedicated `hitl_node` and separated write tool logic from the approval flow.
+
+**Architecture change:** Write tools (`save_memory`, `delete_memory`, `update_memory`) are now purely deterministic `@tool` functions containing only DB logic — no `interrupt()` calls, no embedded search. A new `find_memory` read tool allows the agent to look up existing memories (returning `[ID: uuid] content` lines) before calling delete or update. The HITL interrupt and approval gate lives entirely in `hitl_node`.
+
+`graph.py`: replaced the single `_tool_node` + `tools_condition` pattern with a `tools_router` conditional edge that routes to `"hitl"` when any write tool is called, `"read_tools"` (ToolNode of read tools) otherwise, or `END`. New `find_memory` tool wraps `search_memories_with_ids_impl`. Write tools gain `memory_id`/`content`/`old_content` parameters so the agent explicitly passes the data retrieved from `find_memory`; DB logic (including `_extract_keywords`) runs inside the tool functions. `hitl_node`: reads pending write tool calls from the last AIMessage, calls `_summarize_write_calls(write_calls)` — which serializes the operations as JSON and asks the LLM to produce a concise plain-English summary — then calls `interrupt({"summary": text})`; on approval invokes each write tool via `_WRITE_TOOL_MAP[name].ainvoke(args, config=config)` and collects `ToolMessage` results; on denial returns denied `ToolMessage`s. Edge `hitl → agent` (unconditional — no `after_hitl_router` needed). `_WRITE_TOOL_MAP` dict dispatches by tool name.
+
+`frontend/src/types/index.ts`: simplified `InterruptData` to `{ summary: string }` — removed `tool`, `content`, `keywords`, `old_content` fields.
+
+`frontend/src/components/MessageList.tsx`: amber approval card now renders just the LLM-generated summary text (removed keyword chips, old-content strikethrough, and separate content line).
+
 ## 2026-06-10 (session 13)
 
 Added Human-in-the-Loop (HITL) approval flow for all memory write tools. Before any write executes, the graph pauses and the chat UI shows an amber approval card with the resolved content and keywords. User clicks Approve or Deny; the graph resumes via `Command(resume=bool)`. Interrupt state is persisted in Postgres via `AsyncPostgresSaver`, so pending approvals survive page reloads.

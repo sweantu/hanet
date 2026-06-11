@@ -1,12 +1,12 @@
 import os
 from typing import Annotated
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
-from langgraph.graph import START, StateGraph
+from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt
 from llm import llm
 from pydantic import BaseModel as PydanticBaseModel
@@ -22,6 +22,8 @@ from typing_extensions import TypedDict
 class ChatState(TypedDict):
     messages: Annotated[list, add_messages]
 
+
+# ── Read tools ────────────────────────────────────────────────────────────────
 
 @tool
 async def search_database(query: str, config: RunnableConfig) -> str:
@@ -46,6 +48,26 @@ def search_web(query: str) -> str:
     return "\n\n".join(f"Source: {r['url']}\n{r['content']}" for r in results)
 
 
+@tool
+async def retrieve_memories(query: str, config: RunnableConfig) -> str:
+    """Search stored memories (hot and cold) for information relevant to the query."""
+    db = config["configurable"]["db"]
+    results = await search_memories_impl(query, 5, db)
+    return "\n\n".join(results) if results else "No relevant memories found."
+
+
+@tool
+async def find_memory(description: str, config: RunnableConfig) -> str:
+    """Search for existing memories matching a description. Returns matches with their IDs and content. Always call this before delete_memory or update_memory to obtain the exact memory_id and current content."""
+    db = config["configurable"]["db"]
+    matches = await search_memories_with_ids_impl(description, 5, db)
+    if not matches:
+        return "No matching memories found."
+    return "\n".join(f"[ID: {m['memory_id']}] {m['content']}" for m in matches)
+
+
+# ── Write tools ───────────────────────────────────────────────────────────────
+
 class _Keywords(PydanticBaseModel):
     keywords: list[str]
 
@@ -55,11 +77,7 @@ _keywords_llm = llm.with_structured_output(_Keywords)
 
 async def _extract_keywords(content: str) -> list[str]:
     result = await _keywords_llm.ainvoke(
-        [
-            HumanMessage(
-                content="Extract 5-10 keywords from the text below.\n\n" + content
-            )
-        ]
+        [HumanMessage(content="Extract 5-10 keywords from the text below.\n\n" + content)]
     )
     return result.keywords
 
@@ -73,22 +91,11 @@ async def save_memory(
     content: str,
     config: RunnableConfig,
 ) -> str:
-    """Save a memory. Use 'hot' ONLY for persistent identity facts (name, preferences). Use 'cold' for everything else: events, meals, expenses, activities, or any time-bound information."""
+    """Save a new memory. Use 'hot' ONLY for persistent identity facts (name, preferences). Use 'cold' for everything else: events, meals, expenses, activities, or any time-bound information."""
     from db import save_memory as db_save_memory
     from db import save_memory_embedding
 
     keywords = await _extract_keywords(content)
-    approved = interrupt(
-        {
-            "tool": "save_memory",
-            "summary": f"Save {type} memory",
-            "content": content,
-            "keywords": keywords,
-        }
-    )
-    if not approved:
-        return "Memory save declined."
-
     db = config["configurable"]["db"]
     memory_id = await db_save_memory(db, type, content)
     await save_memory_embedding(db, memory_id, type, content, keywords)
@@ -96,95 +103,112 @@ async def save_memory(
 
 
 @tool
-async def retrieve_memories(query: str, config: RunnableConfig) -> str:
-    """Search stored memories (hot and cold) for information relevant to the query."""
-    db = config["configurable"]["db"]
-    results = await search_memories_impl(query, 5, db)
-    return "\n\n".join(results) if results else "No relevant memories found."
-
-
-@tool
 async def delete_memory(
-    description: Annotated[str, "Natural language description of the memory to delete"],
+    memory_id: Annotated[str, "The exact UUID from find_memory results"],
+    content: Annotated[str, "The current content of the memory (copy from find_memory output) — used for confirmation display only"],
     config: RunnableConfig,
 ) -> str:
-    """Delete the single closest matching memory. Use when the user asks to forget or remove something you remember."""
+    """Delete a memory by its exact ID. Always call find_memory first to get the memory_id and content."""
     from db import delete_memories as db_delete_memories
 
     db = config["configurable"]["db"]
-    matches = await search_memories_with_ids_impl(description, 5, db)
-    if not matches:
-        return "No matching memory found."
-    best = matches[:1]
-    approved = interrupt(
-        {
-            "tool": "delete_memory",
-            "summary": "Delete memory",
-            "content": best[0]["content"],
-            "keywords": [],
-        }
-    )
-    if not approved:
-        return "Memory deletion declined."
-    ids = [m["memory_id"] for m in best]
-    count = await db_delete_memories(db, ids)
-    deleted = "\n".join(f"- {m['content']}" for m in best)
-    return f"Deleted {count} memory:\n{deleted}"
+    count = await db_delete_memories(db, [memory_id])
+    return f"Deleted {count} memory." if count else "Memory not found."
 
 
 @tool
 async def update_memory(
-    description: Annotated[str, "Natural language description of the memory to update"],
-    new_content: Annotated[str, "The new content to replace the matched memory with"],
+    memory_id: Annotated[str, "The exact UUID from find_memory results"],
+    old_content: Annotated[str, "The current content of the memory (copy from find_memory output) — used for confirmation display only"],
+    new_content: Annotated[str, "The replacement content"],
     config: RunnableConfig,
 ) -> str:
-    """Update an existing memory. Use when the user wants to change or correct something you remember (name change, preference update). Finds the single closest match and replaces its content."""
+    """Update an existing memory by its exact ID. Always call find_memory first to get the memory_id and old_content."""
     from db import update_memory as db_update_memory
 
-    db = config["configurable"]["db"]
-    matches = await search_memories_with_ids_impl(description, 5, db)
-    if not matches:
-        return "No matching memory found to update."
-    best = matches[0]
     keywords = await _extract_keywords(new_content)
-    approved = interrupt(
-        {
-            "tool": "update_memory",
-            "summary": "Update memory",
-            "content": new_content,
-            "keywords": keywords,
-            "old_content": best["content"],
-        }
-    )
-    if not approved:
-        return "Memory update declined."
-    await db_update_memory(db, best["memory_id"], new_content, keywords)
-    return f"Updated memory:\n- Old: {best['content']}\n- New: {new_content}"
+    db = config["configurable"]["db"]
+    await db_update_memory(db, memory_id, new_content, keywords)
+    return "Updated memory."
 
 
-_tools = [
-    search_database,
-    search_web,
-    save_memory,
-    retrieve_memories,
-    delete_memory,
-    update_memory,
-]
-_llm_with_tools = llm.bind_tools(_tools)
-_tool_node = ToolNode(_tools)
+# ── Graph nodes ───────────────────────────────────────────────────────────────
+
+WRITE_TOOLS = {"save_memory", "delete_memory", "update_memory"}
+_WRITE_TOOL_MAP = {"save_memory": save_memory, "delete_memory": delete_memory, "update_memory": update_memory}
+
+_read_tools = [search_database, search_web, retrieve_memories, find_memory]
+_write_tools = [save_memory, delete_memory, update_memory]
+_llm_with_tools = llm.bind_tools(_read_tools + _write_tools)
 
 
 async def agent(state: ChatState) -> dict:
-    messages = state["messages"]
-    response = await _llm_with_tools.ainvoke(messages)
+    response = await _llm_with_tools.ainvoke(state["messages"])
     return {"messages": [response]}
+
+
+async def _summarize_write_calls(write_calls: list) -> str:
+    import json
+
+    ops = json.dumps(
+        [{"tool": name, "args": args} for name, _, args in write_calls],
+        indent=2,
+    )
+    msg = await llm.ainvoke(
+        [
+            HumanMessage(
+                content=(
+                    "The assistant wants to perform the following memory operations. "
+                    "Write a concise, plain-English summary (2-4 sentences) describing "
+                    "what will change, so the user can decide whether to approve or deny.\n\n"
+                    + ops
+                )
+            )
+        ]
+    )
+    return msg.content
+
+
+async def hitl_node(state: ChatState, config: RunnableConfig) -> dict:
+    last_msg = state["messages"][-1]
+    write_calls = [
+        (call["name"], call["id"], call["args"])
+        for call in last_msg.tool_calls
+        if call["name"] in WRITE_TOOLS
+    ]
+
+    summary = await _summarize_write_calls(write_calls)
+    approved = interrupt({"summary": summary})
+
+    result_messages = []
+    for name, call_id, args in write_calls:
+        if not approved:
+            result_messages.append(
+                ToolMessage(content="Operation denied by user.", tool_call_id=call_id)
+            )
+            continue
+        result = await _WRITE_TOOL_MAP[name].ainvoke(args, config=config)
+        result_messages.append(ToolMessage(content=result, tool_call_id=call_id))
+
+    return {"messages": result_messages}
+
+
+def tools_router(state: ChatState):
+    last_msg = state["messages"][-1]
+    if not isinstance(last_msg, AIMessage) or not last_msg.tool_calls:
+        return END
+    if any(tc["name"] in WRITE_TOOLS for tc in last_msg.tool_calls):
+        return "hitl"
+    return "read_tools"
 
 
 def build_graph(checkpointer=None):
     builder = StateGraph(ChatState)
     builder.add_node("agent", agent)
-    builder.add_node("tools", _tool_node)
+    builder.add_node("hitl", hitl_node)
+    builder.add_node("read_tools", ToolNode(_read_tools))
     builder.add_edge(START, "agent")
-    builder.add_conditional_edges("agent", tools_condition)
-    builder.add_edge("tools", "agent")
+    builder.add_conditional_edges("agent", tools_router, ["hitl", "read_tools", END])
+    builder.add_edge("hitl", "agent")
+    builder.add_edge("read_tools", "agent")
     return builder.compile(checkpointer=checkpointer)

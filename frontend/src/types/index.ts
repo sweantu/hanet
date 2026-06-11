@@ -1,9 +1,5 @@
 export interface InterruptData {
-  tool: string;
   summary: string;
-  content: string;
-  keywords: string[];
-  old_content?: string;
 }
 
 export interface Message {
