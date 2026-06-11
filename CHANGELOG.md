@@ -1,5 +1,25 @@
 # Project History
 
+## 2026-06-11 (session 15)
+
+Added a third "Re-plan" action to the HITL interrupt flow, and improved memory retrieval recall.
+
+**HITL Re-plan:** The interrupt card now has three actions — Deny, Re-plan, Approve. Clicking Re-plan expands a textarea; Deny and Approve are hidden and replaced by Cancel and Submit. On submit, all write tools are denied and the user's guidance is injected as a `HumanMessage` into the graph state so the agent re-plans. Cancel collapses the textarea and restores the original three buttons.
+
+`backend/models.py`: `ResumeRequest` changed from `approved: bool` to `action: Literal["approve","deny","replan"]` + `message: Optional[str]`; a `model_validator` enforces that replan requires a non-empty message.
+
+`backend/graph.py`: `hitl_node` normalises the resume value (supports dict or legacy bool). For "approve" it executes write tools; for "deny" or "replan" it returns denied `ToolMessage`s. For "replan" it also appends a `HumanMessage(content=replan_message)` to the returned messages, which the `add_messages` reducer appends to state before the graph loops back to `agent`.
+
+`backend/routers/chat.py`: resume endpoint saves the replan user message to DB (and document chunks for search) before streaming, builds `resume_payload = {"action": ..., "message": ...}` and passes it to `Command(resume=...)`.
+
+`frontend/src/types/index.ts`: added `ResumeAction = "approve" | "deny" | "replan"`.
+
+`frontend/src/hooks/useChat.ts`: `resolveInterrupt(action: ResumeAction, message?: string)` — injects a user bubble for replan before the assistant placeholder; POST body changed to `{conversation_id, action, message?}`.
+
+`frontend/src/components/MessageList.tsx`: extracted internal `InterruptCard` component with local `showReplan`/`replanText` state. Default view: Deny | Re-plan | Approve. Expanded view: textarea + Cancel | Submit (Submit disabled when blank; Enter submits, Shift+Enter inserts newline).
+
+**Memory retrieval improvements:** Lowered `search_memories_impl` threshold from 8 to 7 (matching the linter-adjusted value; `search_database_impl` also adjusted to 7) so scores in the 5–7 range are no longer silently dropped. Updated all four read tool descriptions (`search_database`, `search_web`, `retrieve_memories`, `find_memory`) to instruct the agent to use rich, keyword-dense queries with synonyms and context rather than short two-word queries.
+
 ## 2026-06-11 (session 14)
 
 Refactored HITL into a dedicated `hitl_node` and separated write tool logic from the approval flow.

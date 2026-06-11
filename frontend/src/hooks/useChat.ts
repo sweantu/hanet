@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { API_URL } from "../lib/api";
-import type { Conversation, InterruptData, Message } from "../types";
+import type { Conversation, InterruptData, Message, ResumeAction } from "../types";
 
 interface UseChatOptions {
   activeId: string | null;
@@ -136,19 +136,26 @@ export function useChat({
   ]);
 
   const resolveInterrupt = useCallback(
-    async (approved: boolean) => {
+    async (action: ResumeAction, message?: string) => {
       if (!activeId) return;
 
       setMessages((prev) => prev.filter((m) => m.role !== "interrupt"));
       setPendingInterrupt(false);
       setIsStreaming(true);
+
+      if (action === "replan" && message) {
+        setMessages((prev) => [...prev, { role: "user", content: message }]);
+      }
       setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
       try {
+        const body: Record<string, unknown> = { conversation_id: activeId, action };
+        if (action === "replan" && message) body.message = message;
+
         const res = await fetch(`${API_URL}/chat/resume`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ conversation_id: activeId, approved }),
+          body: JSON.stringify(body),
         });
 
         if (!res.ok || !res.body) throw new Error("Resume failed");

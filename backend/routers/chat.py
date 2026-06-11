@@ -164,10 +164,24 @@ async def resume_chat(body: ResumeRequest, request: Request, db=Depends(get_db))
     conv_id = body.conversation_id
     config = {"configurable": {"thread_id": conv_id, "db": db}}
 
+    # Persist replan message before streaming (durable even on client disconnect)
+    replan_msg_id = None
+    if body.action == "replan":
+        replan_msg_id = await db.fetchval(
+            "INSERT INTO messages (conversation_id, role, content) VALUES ($1::uuid, $2, $3) RETURNING id",
+            conv_id,
+            "user",
+            body.message,
+        )
+
+    resume_payload: bool | dict = {"action": body.action}
+    if body.action == "replan":
+        resume_payload["message"] = body.message
+
     async def generate():
         results = []
         async for sse_line in _stream_graph(
-            graph, Command(resume=body.approved), config, results
+            graph, Command(resume=resume_payload), config, results
         ):
             yield sse_line
 
@@ -189,6 +203,19 @@ async def resume_chat(body: ResumeRequest, request: Request, db=Depends(get_db))
             "SELECT title FROM conversations WHERE id = $1::uuid", conv_id
         )
         conv_title = conv_row["title"] if conv_row else ""
+
+        if body.action == "replan" and replan_msg_id:
+            await save_chunks(
+                db,
+                "message",
+                body.message,
+                {
+                    "message_id": str(replan_msg_id),
+                    "conversation_id": conv_id,
+                    "conversation_title": conv_title,
+                    "role": "user",
+                },
+            )
 
         await save_chunks(
             db,

@@ -51,7 +51,7 @@ async def search_database_impl(query: str, limit: int, db) -> list[str]:
 
     qualifying: list[tuple] = []
     for row, score in ranked:
-        if score < 8:
+        if score < 7:
             continue
         meta = (
             row["metadata"]
@@ -80,7 +80,7 @@ async def search_memories_impl(query: str, limit: int, db) -> list[str]:
     if not rows:
         return []
     scores = await _llm_score(query, rows)
-    return [r["content"] for r, s in zip(rows, scores) if s >= 8]
+    return [r["content"] for r, s in zip(rows, scores) if s >= 7]
 
 
 async def search_memories_with_ids_impl(query: str, limit: int, db) -> list[dict]:

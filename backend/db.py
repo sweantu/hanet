@@ -3,7 +3,6 @@ import json
 import uuid
 
 import tiktoken
-
 from llm import embeddings_model
 
 _enc = tiktoken.encoding_for_model("text-embedding-3-small")
@@ -96,6 +95,7 @@ async def update_memory(db, memory_id: str, new_content: str, keywords: list[str
         fts_input,
         keywords,
     )
+    print(f"{memory_id} and {new_content}")
 
 
 def encode_cursor(*parts: str) -> str:

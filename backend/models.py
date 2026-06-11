@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import TypedDict
+from typing import Literal, Optional, TypedDict
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class Message(BaseModel):
@@ -53,5 +53,12 @@ class Memory(BaseModel):
 
 class ResumeRequest(BaseModel):
     conversation_id: str
-    approved: bool
+    action: Literal["approve", "deny", "replan"]
+    message: Optional[str] = None
+
+    @model_validator(mode="after")
+    def replan_requires_message(self) -> "ResumeRequest":
+        if self.action == "replan" and not (self.message and self.message.strip()):
+            raise ValueError("message is required when action is 'replan'")
+        return self
 

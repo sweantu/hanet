@@ -1,3 +1,5 @@
+export type ResumeAction = "approve" | "deny" | "replan";
+
 export interface InterruptData {
   summary: string;
 }

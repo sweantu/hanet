@@ -27,7 +27,7 @@ class ChatState(TypedDict):
 
 @tool
 async def search_database(query: str, config: RunnableConfig) -> str:
-    """Search the conversation database for relevant past messages."""
+    """Search the conversation database for relevant past messages. Use a rich, descriptive query — include specific keywords, context, and synonyms (e.g. 'Python async await concurrency performance issue slow' rather than just 'Python performance') to improve recall."""
     db = config["configurable"]["db"]
     results = await search_database_impl(query, 5, db)
     return (
@@ -39,7 +39,7 @@ async def search_database(query: str, config: RunnableConfig) -> str:
 
 @tool
 def search_web(query: str) -> str:
-    """Search the web for current information."""
+    """Search the web for current information. Use a rich, descriptive query with specific keywords and context (e.g. 'Python asyncio event loop blocking call best practices 2024' rather than just 'Python async') to get more targeted results."""
     client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
     response = client.search(query, max_results=5)
     results = response.get("results", [])
@@ -50,7 +50,7 @@ def search_web(query: str) -> str:
 
 @tool
 async def retrieve_memories(query: str, config: RunnableConfig) -> str:
-    """Search stored memories (hot and cold) for information relevant to the query."""
+    """Search stored memories (hot and cold) for information relevant to the query. Use a rich, descriptive query — include specific keywords, context, and synonyms (e.g. 'food meal restaurant expense cost price VND' rather than just 'foods expense') to improve recall."""
     db = config["configurable"]["db"]
     results = await search_memories_impl(query, 5, db)
     return "\n\n".join(results) if results else "No relevant memories found."
@@ -58,7 +58,7 @@ async def retrieve_memories(query: str, config: RunnableConfig) -> str:
 
 @tool
 async def find_memory(description: str, config: RunnableConfig) -> str:
-    """Search for existing memories matching a description. Returns matches with their IDs and content. Always call this before delete_memory or update_memory to obtain the exact memory_id and current content."""
+    """Search for existing memories matching a description. Returns matches with their IDs and content. Always call this before delete_memory or update_memory to obtain the exact memory_id and current content. Use a rich, descriptive query with specific keywords and synonyms (e.g. 'food meal restaurant expense cost price VND' rather than just 'food expense') to improve recall."""
     db = config["configurable"]["db"]
     matches = await search_memories_with_ids_impl(description, 5, db)
     if not matches:
@@ -178,17 +178,28 @@ async def hitl_node(state: ChatState, config: RunnableConfig) -> dict:
     ]
 
     summary = await _summarize_write_calls(write_calls)
-    approved = interrupt({"summary": summary})
+    resume_value = interrupt({"summary": summary})
+
+    # Support both legacy bool and new dict form
+    if isinstance(resume_value, bool):
+        action = "approve" if resume_value else "deny"
+        replan_message = None
+    else:
+        action = resume_value.get("action", "deny")
+        replan_message = resume_value.get("message")
 
     result_messages = []
     for name, call_id, args in write_calls:
-        if not approved:
+        if action == "approve":
+            result = await _WRITE_TOOL_MAP[name].ainvoke(args, config=config)
+            result_messages.append(ToolMessage(content=result, tool_call_id=call_id))
+        else:
             result_messages.append(
                 ToolMessage(content="Operation denied by user.", tool_call_id=call_id)
             )
-            continue
-        result = await _WRITE_TOOL_MAP[name].ainvoke(args, config=config)
-        result_messages.append(ToolMessage(content=result, tool_call_id=call_id))
+
+    if action == "replan" and replan_message:
+        result_messages.append(HumanMessage(content=replan_message))
 
     return {"messages": result_messages}
 
