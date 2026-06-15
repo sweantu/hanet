@@ -1,5 +1,21 @@
 # Project History
 
+## 2026-06-15 (session 16)
+
+Hardened memory write tool robustness and improved LLM relevance scoring.
+
+**Memory write tool hardening (`graph.py`, `db.py`):**
+
+`db.update_memory` now returns `int` (rows affected) using the same `result.split()[-1]` pattern as `delete_memories`. The `update_memory` tool in `graph.py` checks this count and returns `"Memory not found. Call find_memory first to get the correct memory_id."` when 0 rows were updated — instead of silently succeeding on a hallucinated or stale UUID (as `"Updated memory."` was returned unconditionally before).
+
+Both `update_memory` and `delete_memory` tools now validate the `memory_id` argument with `uuid.UUID(memory_id)` before touching the DB. Hallucinated placeholders like `'memory_id_1'` now return a graceful error ToolMessage instead of crashing asyncpg with a `DataError`.
+
+`hitl_node` now detects mixed read+write tool calls in a single AIMessage. Previously, when the model emitted both `find_memory` and `save_memory` in the same turn, the node only processed write calls and left the read call ID without a `ToolMessage`, causing OpenAI to reject the next agent call with a 400. Now, if any read tool is present alongside write tools, all call IDs receive an error ToolMessage and `interrupt()` is skipped entirely — the model retries with reads and writes in separate turns.
+
+**LLM relevance scoring (`rag.py`):**
+
+`_llm_score` prompt replaced. The previous bare prompt ("Rate each passage 0–10 for relevance") caused the LLM to default to 5 when uncertain — e.g. "coffee" and "lemon tea" passages scored 5 for the query "drinking expense cost" and were dropped by the ≥7 filter. The new prompt defines the full scale (9–10 exact match, 7–8 clearly relevant, 4–6 tangential, 0–3 unrelated) and instructs the LLM to recognise semantic categories ("coffee", "tea", "juice" are drinks; "rice", "noodles", "buns" are food; etc.).
+
 ## 2026-06-11 (session 15)
 
 Added a third "Re-plan" action to the HITL interrupt flow, and improved memory retrieval recall.

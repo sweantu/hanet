@@ -77,25 +77,27 @@ async def delete_memories(db, memory_ids: list[str]) -> int:
     return int(result.split()[-1])
 
 
-async def update_memory(db, memory_id: str, new_content: str, keywords: list[str]) -> None:
+async def update_memory(db, memory_id: str, new_content: str, keywords: list[str]) -> int:
     embedding = await embeddings_model.aembed_query(new_content)
     fts_input = " ".join(keywords) if keywords else new_content
-    await db.execute(
+    result = await db.execute(
         "UPDATE memories SET content=$2 WHERE id=$1::uuid",
         memory_id,
         new_content,
     )
-    await db.execute(
-        "UPDATE documents SET content=$2, embedding=$3::vector, "
-        "fts=to_tsvector('english', $4), keywords=$5::text[] "
-        "WHERE collection='memory' AND metadata->>'memory_id'=$1",
-        memory_id,
-        new_content,
-        embedding,
-        fts_input,
-        keywords,
-    )
-    print(f"{memory_id} and {new_content}")
+    count = int(result.split()[-1])
+    if count:
+        await db.execute(
+            "UPDATE documents SET content=$2, embedding=$3::vector, "
+            "fts=to_tsvector('english', $4), keywords=$5::text[] "
+            "WHERE collection='memory' AND metadata->>'memory_id'=$1",
+            memory_id,
+            new_content,
+            embedding,
+            fts_input,
+            keywords,
+        )
+    return count
 
 
 def encode_cursor(*parts: str) -> str:

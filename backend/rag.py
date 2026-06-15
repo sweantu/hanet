@@ -19,7 +19,14 @@ async def _llm_score(query: str, rows: list) -> list[float]:
     try:
         content = (
             f"Query: {query}\n\n"
-            f"Rate each passage 0–10 for relevance to the query. "
+            f"Score each passage 0–10 for relevance to the query.\n"
+            f"- 9–10: directly answers the query (exact item or category asked about)\n"
+            f"- 7–8: clearly relevant — same topic, category, or concept\n"
+            f"- 4–6: tangentially related or partially relevant\n"
+            f"- 1–3: mostly unrelated, only superficial connection\n"
+            f"- 0: completely irrelevant\n\n"
+            f"Consider semantic relationships: e.g. 'coffee', 'tea', 'juice' are drinks; "
+            f"'rice', 'noodles', 'buns' are food; 'taxi', 'grab', 'bus' are transport.\n\n"
             f"Return one score per passage in the same order.\n\n"
             f"{chunks_text}"
         )

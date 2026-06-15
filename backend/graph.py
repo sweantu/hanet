@@ -1,4 +1,5 @@
 import os
+import uuid
 from typing import Annotated
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -111,6 +112,11 @@ async def delete_memory(
     """Delete a memory by its exact ID. Always call find_memory first to get the memory_id and content."""
     from db import delete_memories as db_delete_memories
 
+    try:
+        uuid.UUID(memory_id)
+    except ValueError:
+        return "Invalid memory_id — not a valid UUID. Call find_memory first to get the correct memory_id."
+
     db = config["configurable"]["db"]
     count = await db_delete_memories(db, [memory_id])
     return f"Deleted {count} memory." if count else "Memory not found."
@@ -126,9 +132,16 @@ async def update_memory(
     """Update an existing memory by its exact ID. Always call find_memory first to get the memory_id and old_content."""
     from db import update_memory as db_update_memory
 
+    try:
+        uuid.UUID(memory_id)
+    except ValueError:
+        return "Invalid memory_id — not a valid UUID. Call find_memory first to get the correct memory_id."
+
     keywords = await _extract_keywords(new_content)
     db = config["configurable"]["db"]
-    await db_update_memory(db, memory_id, new_content, keywords)
+    count = await db_update_memory(db, memory_id, new_content, keywords)
+    if not count:
+        return "Memory not found. Call find_memory first to get the correct memory_id."
     return "Updated memory."
 
 
@@ -171,6 +184,19 @@ async def _summarize_write_calls(write_calls: list) -> str:
 
 async def hitl_node(state: ChatState, config: RunnableConfig) -> dict:
     last_msg = state["messages"][-1]
+
+    has_read = any(tc["name"] not in WRITE_TOOLS for tc in last_msg.tool_calls)
+    if has_read:
+        return {
+            "messages": [
+                ToolMessage(
+                    content="Error: do not mix read and write tool calls in one message. Call read tools first, then write tools in a separate turn.",
+                    tool_call_id=call["id"],
+                )
+                for call in last_msg.tool_calls
+            ]
+        }
+
     write_calls = [
         (call["name"], call["id"], call["args"])
         for call in last_msg.tool_calls
