@@ -1,10 +1,10 @@
 import json
 
-from db import get_hot_memories, save_chunks
+from db import save_chunks
 from dependencies import get_db
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 from models import ChatRequest, ResumeRequest
 
@@ -81,28 +81,26 @@ async def chat(body: ChatRequest, request: Request, db=Depends(get_db)):
             conv_id,
         )
 
-    ctx_rows = await db.fetch(
-        """SELECT id, role, content FROM messages
-           WHERE conversation_id = $1::uuid
-           ORDER BY created_at DESC LIMIT 10""",
-        conv_id,
-    )
-    ctx_rows = list(reversed(ctx_rows))
+    # If the checkpointer already has state for this thread, only inject the new
+    # user message — the full history lives in the checkpoint. Otherwise seed
+    # from the DB (new conversation or first turn after migration).
+    has_checkpoint = bool(state.values.get("messages"))
 
-    hot_memories = await get_hot_memories(db)
-    system_content = "You are a helpful assistant."
-    if hot_memories:
-        system_content += "\n\nThings to always remember:\n" + "\n".join(
-            f"- {m}" for m in hot_memories
+    if has_checkpoint:
+        lc_messages = [HumanMessage(content=body.message)]
+    else:
+        ctx_rows = await db.fetch(
+            """SELECT role, content FROM messages
+               WHERE conversation_id = $1::uuid
+               ORDER BY created_at ASC""",
+            conv_id,
         )
-
-    lc_messages = [SystemMessage(content=system_content)]
-    lc_messages += [
-        HumanMessage(content=r["content"])
-        if r["role"] == "user"
-        else AIMessage(content=r["content"])
-        for r in ctx_rows
-    ]
+        lc_messages = [
+            HumanMessage(content=r["content"])
+            if r["role"] == "user"
+            else AIMessage(content=r["content"])
+            for r in ctx_rows
+        ]
 
     async def generate():
         results = []

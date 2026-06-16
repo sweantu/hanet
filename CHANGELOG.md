@@ -1,5 +1,23 @@
 # Project History
 
+## 2026-06-16 (session 17)
+
+Replaced the hard 10-message context window with LangGraph-native stateful history and rolling summarization.
+
+**Context window — stateful checkpointer (`routers/chat.py`):**
+
+`POST /chat` no longer re-seeds the LangGraph graph from scratch on every turn. It checks `state.values.get("messages")`: if the checkpointer already holds state for the thread, only the new `HumanMessage` is injected and the full history is restored from the checkpoint. For new conversations (or existing ones migrating to this behaviour for the first time), all messages are loaded from the DB ordered ASC and used as the seed — `maybe_summarize` compacts them immediately if they exceed the threshold. The manual hot-memories and system-prompt construction in `chat.py` was removed; the `agent` node now owns it.
+
+**Rolling summarization (`graph.py`):**
+
+`ChatState` gained a `summary: str` field persisted automatically by `AsyncPostgresSaver`. A new `maybe_summarize` node fires at `START` of every user turn (before `agent`). When `len(messages) > SUMMARIZE_THRESHOLD` (20), it walks back from `len - KEEP_RECENT` (8) to the nearest `HumanMessage` boundary, summarizes all older messages via a dedicated LLM call (folding in any existing summary), removes them from state with `RemoveMessage`, and stores the new summary. Tool-loop edges (`hitl → agent`, `read_tools → agent`) bypass `maybe_summarize` so summarization does not fire mid-turn.
+
+**System prompt moved into `agent` node (`graph.py`):**
+
+`agent` now accepts `config: RunnableConfig`, fetches hot memories from the DB directly, and prepends a fresh `SystemMessage` (base prompt + hot memories + summary if present) on every LLM call. This keeps the system message out of persisted state and ensures hot memories are always current.
+
+Constants: `SUMMARIZE_THRESHOLD = 20`, `KEEP_RECENT = 8`.
+
 ## 2026-06-15 (session 16)
 
 Hardened memory write tool robustness and improved LLM relevance scoring.

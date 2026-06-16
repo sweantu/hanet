@@ -2,7 +2,13 @@ import os
 import uuid
 from typing import Annotated
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
@@ -22,6 +28,11 @@ from typing_extensions import TypedDict
 
 class ChatState(TypedDict):
     messages: Annotated[list, add_messages]
+    summary: str
+
+
+SUMMARIZE_THRESHOLD = 20
+KEEP_RECENT = 8
 
 
 # ── Read tools ────────────────────────────────────────────────────────────────
@@ -155,8 +166,70 @@ _write_tools = [save_memory, delete_memory, update_memory]
 _llm_with_tools = llm.bind_tools(_read_tools + _write_tools)
 
 
-async def agent(state: ChatState) -> dict:
-    response = await _llm_with_tools.ainvoke(state["messages"])
+async def maybe_summarize(state: ChatState) -> dict:
+    messages = state["messages"]
+    if len(messages) <= SUMMARIZE_THRESHOLD:
+        return {}
+
+    # Find a safe cut boundary: walk back from (len - KEEP_RECENT) until we land on a HumanMessage
+    boundary = len(messages) - KEEP_RECENT
+    while boundary > 0 and not isinstance(messages[boundary], HumanMessage):
+        boundary -= 1
+    if boundary <= 0:
+        return {}
+
+    to_summarize = messages[:boundary]
+    existing_summary = state.get("summary", "")
+
+    parts = []
+    if existing_summary:
+        parts.append(f"Previous summary:\n{existing_summary}")
+    parts.append("Conversation to summarize:")
+    for msg in to_summarize:
+        if isinstance(msg, HumanMessage) and isinstance(msg.content, str):
+            parts.append(f"User: {msg.content[:800]}")
+        elif (
+            isinstance(msg, AIMessage)
+            and not msg.tool_calls
+            and isinstance(msg.content, str)
+        ):
+            parts.append(f"Assistant: {msg.content[:800]}")
+
+    new_summary = await llm.ainvoke(
+        [
+            SystemMessage(
+                content="Summarize the conversation below concisely, capturing key facts, preferences, decisions, and context. If a previous summary exists, fold it in."
+            ),
+            HumanMessage(content="\n\n".join(parts)),
+        ]
+    )
+
+    print(f"summary: {new_summary.content}")
+
+    return {
+        "messages": [RemoveMessage(id=m.id) for m in to_summarize],
+        "summary": new_summary.content,
+    }
+
+
+async def agent(state: ChatState, config: RunnableConfig) -> dict:
+    from db import get_hot_memories
+
+    db = config["configurable"]["db"]
+    hot_memories = await get_hot_memories(db)
+
+    system_content = "You are a helpful assistant."
+    if hot_memories:
+        system_content += "\n\nThings to always remember:\n" + "\n".join(
+            f"- {m}" for m in hot_memories
+        )
+    summary = state.get("summary", "")
+    if summary:
+        system_content += f"\n\nConversation summary (context from earlier in this conversation):\n{summary}"
+
+    response = await _llm_with_tools.ainvoke(
+        [SystemMessage(content=system_content)] + state["messages"]
+    )
     return {"messages": [response]}
 
 
@@ -241,10 +314,12 @@ def tools_router(state: ChatState):
 
 def build_graph(checkpointer=None):
     builder = StateGraph(ChatState)
+    builder.add_node("maybe_summarize", maybe_summarize)
     builder.add_node("agent", agent)
     builder.add_node("hitl", hitl_node)
     builder.add_node("read_tools", ToolNode(_read_tools))
-    builder.add_edge(START, "agent")
+    builder.add_edge(START, "maybe_summarize")
+    builder.add_edge("maybe_summarize", "agent")
     builder.add_conditional_edges("agent", tools_router, ["hitl", "read_tools", END])
     builder.add_edge("hitl", "agent")
     builder.add_edge("read_tools", "agent")
